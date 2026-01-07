@@ -25,13 +25,9 @@ def FrequentWords(Text, k):
 
 def FrequencyMap(Text, k):
     freq = {}
-    n = len(Text)
-    for i in range(n-k+1):
-        Pattern = Text[i:i+k]
-        freq[Pattern] = 0
-    for i in range(n-k+1):
-        Pattern = Text[i:i+k]
-        freq[Pattern] += 1
+    for i in range(len(Text) - k + 1):
+        pattern = Text[i:i+k]
+        freq[pattern] = freq.get(pattern, 0) + 1
     return freq
 
 Text = "atcaatgattatttcatatttcatattt"
