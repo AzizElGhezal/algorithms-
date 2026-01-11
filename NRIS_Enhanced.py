@@ -1134,6 +1134,11 @@ def generate_pdf_report(report_id: int) -> Optional[bytes]:
                                      textColor=colors.HexColor('#7f8c8d'))
         warning_style = ParagraphStyle('Warning', parent=styles['Normal'], fontSize=9,
                                        textColor=colors.HexColor('#c0392b'), fontName='Helvetica-Bold')
+        # Cell style for wrapped text in tables
+        cell_style = ParagraphStyle('Cell', parent=styles['Normal'], fontSize=8,
+                                    leading=10, wordWrap='CJK')
+        cell_style_bold = ParagraphStyle('CellBold', parent=styles['Normal'], fontSize=8,
+                                         leading=10, wordWrap='CJK', fontName='Helvetica-Bold')
 
         # ===== HEADER =====
         story.append(Paragraph("CLINICAL GENETICS LABORATORY", title_style))
@@ -1266,45 +1271,59 @@ def generate_pdf_report(report_id: int) -> Optional[bytes]:
                 return f"{z:.2f}"
             return str(z)
 
-        # Results table with risk interpretation
-        results_header = [['Condition', 'Result', 'Z-Score', 'Risk Category', 'Reference']]
+        # Results table with risk interpretation - use Paragraph for text wrapping
+        results_header = [[
+            Paragraph('<b>Condition</b>', cell_style),
+            Paragraph('<b>Result</b>', cell_style),
+            Paragraph('<b>Z-Score</b>', cell_style),
+            Paragraph('<b>Risk Category</b>', cell_style),
+            Paragraph('<b>Ref</b>', cell_style)
+        ]]
         results_rows = [
-            ['Trisomy 21 (Down Syndrome)', row['t21_res'], fmt_z(z21),
-             'SCREEN POSITIVE' if 'POSITIVE' in str(row['t21_res']).upper() else 'LOW RISK',
-             'Z < 2.58'],
-            ['Trisomy 18 (Edwards Syndrome)', row['t18_res'], fmt_z(z18),
-             'SCREEN POSITIVE' if 'POSITIVE' in str(row['t18_res']).upper() else 'LOW RISK',
-             'Z < 2.58'],
-            ['Trisomy 13 (Patau Syndrome)', row['t13_res'], fmt_z(z13),
-             'SCREEN POSITIVE' if 'POSITIVE' in str(row['t13_res']).upper() else 'LOW RISK',
-             'Z < 2.58'],
-            ['Sex Chromosome Aneuploidy', row['sca_res'], f"XX:{fmt_z(z_xx)} XY:{fmt_z(z_xy)}",
-             'SCREEN POSITIVE' if 'POSITIVE' in str(row['sca_res']).upper() else 'LOW RISK',
-             'Z < 4.5'],
+            [Paragraph('Trisomy 21 (Down Syndrome)', cell_style),
+             Paragraph(str(row['t21_res']), cell_style),
+             Paragraph(fmt_z(z21), cell_style),
+             Paragraph('SCREEN POSITIVE' if 'POSITIVE' in str(row['t21_res']).upper() else 'LOW RISK', cell_style),
+             Paragraph('Z &lt; 2.58', cell_style)],
+            [Paragraph('Trisomy 18 (Edwards Syndrome)', cell_style),
+             Paragraph(str(row['t18_res']), cell_style),
+             Paragraph(fmt_z(z18), cell_style),
+             Paragraph('SCREEN POSITIVE' if 'POSITIVE' in str(row['t18_res']).upper() else 'LOW RISK', cell_style),
+             Paragraph('Z &lt; 2.58', cell_style)],
+            [Paragraph('Trisomy 13 (Patau Syndrome)', cell_style),
+             Paragraph(str(row['t13_res']), cell_style),
+             Paragraph(fmt_z(z13), cell_style),
+             Paragraph('SCREEN POSITIVE' if 'POSITIVE' in str(row['t13_res']).upper() else 'LOW RISK', cell_style),
+             Paragraph('Z &lt; 2.58', cell_style)],
+            [Paragraph('Sex Chromosome Aneuploidy', cell_style),
+             Paragraph(str(row['sca_res']), cell_style),
+             Paragraph(f"XX:{fmt_z(z_xx)} XY:{fmt_z(z_xy)}", cell_style),
+             Paragraph('SCREEN POSITIVE' if 'POSITIVE' in str(row['sca_res']).upper() else 'LOW RISK', cell_style),
+             Paragraph('Z &lt; 4.5', cell_style)],
         ]
 
         results_data = results_header + results_rows
-        results_table = Table(results_data, colWidths=[1.8*inch, 1.5*inch, 1.1*inch, 1.1*inch, 0.9*inch])
+        results_table = Table(results_data, colWidths=[1.6*inch, 1.6*inch, 1.0*inch, 1.2*inch, 0.8*inch])
 
         # Color code results
         table_style = [
             ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2c3e50')),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 8),
             ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#bdc3c7')),
-            ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
-            ('TOPPADDING', (0, 0), (-1, -1), 5),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
         ]
 
-        # Highlight positive results
-        for idx, result_row in enumerate(results_rows, 1):
-            if 'POSITIVE' in str(result_row[1]).upper() or 'POSITIVE' in str(result_row[3]).upper():
-                table_style.append(('BACKGROUND', (0, idx), (-1, idx), colors.HexColor('#fadbd8')))
-                table_style.append(('TEXTCOLOR', (3, idx), (3, idx), colors.HexColor('#c0392b')))
-                table_style.append(('FONTNAME', (3, idx), (3, idx), 'Helvetica-Bold'))
+        # Highlight positive results - check Paragraph content
+        for idx in range(len(results_rows)):
+            result_text = str(row['t21_res']) if idx == 0 else (
+                str(row['t18_res']) if idx == 1 else (
+                    str(row['t13_res']) if idx == 2 else str(row['sca_res'])
+                )
+            )
+            if 'POSITIVE' in result_text.upper():
+                table_style.append(('BACKGROUND', (0, idx+1), (-1, idx+1), colors.HexColor('#fadbd8')))
 
         results_table.setStyle(TableStyle(table_style))
         story.append(results_table)
@@ -1317,17 +1336,17 @@ def generate_pdf_report(report_id: int) -> Optional[bytes]:
         # ===== CNV FINDINGS =====
         if cnvs and len(cnvs) > 0:
             story.append(Paragraph("COPY NUMBER VARIATION (CNV) FINDINGS", section_style))
-            cnv_header = [['Finding', 'Clinical Significance']]
-            cnv_rows = [[str(cnv), get_clinical_recommendation(str(cnv), 'CNV')] for cnv in cnvs]
+            cnv_header = [[Paragraph('<b>Finding</b>', cell_style), Paragraph('<b>Clinical Significance</b>', cell_style)]]
+            cnv_rows = [[Paragraph(str(cnv), cell_style), Paragraph(get_clinical_recommendation(str(cnv), 'CNV'), cell_style)] for cnv in cnvs]
             cnv_data = cnv_header + cnv_rows
-            cnv_table = Table(cnv_data, colWidths=[3*inch, 3.5*inch])
+            cnv_table = Table(cnv_data, colWidths=[2.5*inch, 4*inch])
             cnv_table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#8e44ad')),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, -1), 8),
                 ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#bdc3c7')),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+                ('TOPPADDING', (0, 0), (-1, -1), 6),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ]))
             story.append(cnv_table)
             story.append(Spacer(1, 0.1*inch))
@@ -1335,30 +1354,58 @@ def generate_pdf_report(report_id: int) -> Optional[bytes]:
         # ===== RAT FINDINGS =====
         if rats and len(rats) > 0:
             story.append(Paragraph("RARE AUTOSOMAL TRISOMY (RAT) FINDINGS", section_style))
-            rat_header = [['Finding', 'Clinical Significance']]
-            rat_rows = [[str(rat), get_clinical_recommendation(str(rat), 'RAT')] for rat in rats]
+            rat_header = [[Paragraph('<b>Finding</b>', cell_style), Paragraph('<b>Clinical Significance</b>', cell_style)]]
+            rat_rows = [[Paragraph(str(rat), cell_style), Paragraph(get_clinical_recommendation(str(rat), 'RAT'), cell_style)] for rat in rats]
             rat_data = rat_header + rat_rows
-            rat_table = Table(rat_data, colWidths=[3*inch, 3.5*inch])
+            rat_table = Table(rat_data, colWidths=[2.5*inch, 4*inch])
             rat_table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#d35400')),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, -1), 8),
                 ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#bdc3c7')),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+                ('TOPPADDING', (0, 0), (-1, -1), 6),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ]))
             story.append(rat_table)
             story.append(Spacer(1, 0.1*inch))
 
-        # ===== MATERNAL AGE RISK =====
+        # ===== MATERNAL FACTORS & AGE-BASED RISK =====
+        story.append(Paragraph("MATERNAL FACTORS & AGE-BASED RISK", section_style))
+
+        # Build maternal factors text
+        maternal_factors = []
+        if row['age']:
+            maternal_factors.append(f"<b>Maternal Age:</b> {row['age']} years")
+        if bmi_val and bmi_val != 'N/A':
+            bmi_category = ""
+            try:
+                bmi_num = float(bmi_val)
+                if bmi_num < 18.5:
+                    bmi_category = " (Underweight)"
+                elif bmi_num < 25:
+                    bmi_category = " (Normal)"
+                elif bmi_num < 30:
+                    bmi_category = " (Overweight)"
+                else:
+                    bmi_category = " (Obese - may affect fetal fraction)"
+            except:
+                pass
+            maternal_factors.append(f"<b>BMI:</b> {bmi_val}{bmi_category}")
+        if row['weeks']:
+            maternal_factors.append(f"<b>Gestational Age:</b> {row['weeks']} weeks")
+
+        if maternal_factors:
+            story.append(Paragraph(" | ".join(maternal_factors), styles['Normal']))
+            story.append(Spacer(1, 0.05*inch))
+
+        # Age-based prior risk
         if maternal_risk and row['age']:
-            story.append(Paragraph("MATERNAL AGE-BASED PRIOR RISK", section_style))
             risk_text = (f"Based on maternal age of {row['age']} years, the a priori risks are: "
                         f"Trisomy 21: 1 in {int(1/maternal_risk['T21'])}, "
                         f"Trisomy 18: 1 in {int(1/maternal_risk['T18'])}, "
                         f"Trisomy 13: 1 in {int(1/maternal_risk['T13'])}")
             story.append(Paragraph(risk_text, small_style))
-            story.append(Spacer(1, 0.1*inch))
+        story.append(Spacer(1, 0.1*inch))
 
         # ===== FINAL INTERPRETATION =====
         story.append(Paragraph("FINAL INTERPRETATION", section_style))
@@ -1367,15 +1414,17 @@ def generate_pdf_report(report_id: int) -> Optional[bytes]:
         final_color = colors.HexColor('#27ae60') if 'NEGATIVE' in str(final_summary).upper() else (
             colors.HexColor('#e74c3c') if 'POSITIVE' in str(final_summary).upper() else colors.HexColor('#f39c12'))
 
-        final_box = Table([[final_summary]], colWidths=[6.5*inch])
+        # Create centered style for final box with text wrapping
+        final_cell_style = ParagraphStyle('FinalCell', parent=styles['Normal'], fontSize=12,
+                                          leading=14, alignment=TA_CENTER, textColor=colors.whitesmoke,
+                                          fontName='Helvetica-Bold', wordWrap='CJK')
+        final_box = Table([[Paragraph(str(final_summary), final_cell_style)]], colWidths=[6.5*inch])
         final_box.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (0, 0), final_color),
-            ('TEXTCOLOR', (0, 0), (0, 0), colors.whitesmoke),
-            ('FONTNAME', (0, 0), (0, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (0, 0), 12),
-            ('ALIGN', (0, 0), (0, 0), 'CENTER'),
-            ('BOTTOMPADDING', (0, 0), (0, 0), 8),
-            ('TOPPADDING', (0, 0), (0, 0), 8),
+            ('BOTTOMPADDING', (0, 0), (0, 0), 10),
+            ('TOPPADDING', (0, 0), (0, 0), 10),
+            ('LEFTPADDING', (0, 0), (0, 0), 10),
+            ('RIGHTPADDING', (0, 0), (0, 0), 10),
         ]))
         story.append(final_box)
         story.append(Spacer(1, 0.1*inch))
@@ -1403,8 +1452,39 @@ def generate_pdf_report(report_id: int) -> Optional[bytes]:
 
         # ===== CLINICAL NOTES =====
         if row['clinical_notes']:
-            story.append(Paragraph("CLINICAL NOTES", section_style))
-            story.append(Paragraph(str(row['clinical_notes']), styles['Normal']))
+            story.append(Paragraph("CLINICAL NOTES & OBSERVATIONS", section_style))
+            notes_text = str(row['clinical_notes'])
+            # Create a styled box for clinical notes
+            notes_style = ParagraphStyle('Notes', parent=styles['Normal'], fontSize=9,
+                                         leading=12, wordWrap='CJK', leftIndent=10, rightIndent=10)
+            notes_box = Table([[Paragraph(notes_text, notes_style)]], colWidths=[6.5*inch])
+            notes_box.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (0, 0), colors.HexColor('#f8f9fa')),
+                ('BOX', (0, 0), (0, 0), 0.5, colors.HexColor('#dee2e6')),
+                ('BOTTOMPADDING', (0, 0), (0, 0), 8),
+                ('TOPPADDING', (0, 0), (0, 0), 8),
+                ('LEFTPADDING', (0, 0), (0, 0), 8),
+                ('RIGHTPADDING', (0, 0), (0, 0), 8),
+            ]))
+            story.append(notes_box)
+
+            # Highlight key clinical markers if present
+            key_markers = []
+            notes_lower = notes_text.lower()
+            if 'nuchal' in notes_lower or 'nt' in notes_lower:
+                key_markers.append("Nuchal Translucency noted")
+            if 'fetal fraction' in notes_lower or 'ff' in notes_lower:
+                key_markers.append("Fetal Fraction concerns noted")
+            if 'ivf' in notes_lower or 'icsi' in notes_lower:
+                key_markers.append("ART/IVF conception noted")
+            if 'twin' in notes_lower or 'multiple' in notes_lower:
+                key_markers.append("Multiple gestation noted")
+
+            if key_markers:
+                story.append(Spacer(1, 0.05*inch))
+                markers_text = "<i>Key clinical markers: " + ", ".join(key_markers) + "</i>"
+                story.append(Paragraph(markers_text, small_style))
+
             story.append(Spacer(1, 0.1*inch))
 
         # ===== LIMITATIONS & DISCLAIMER =====
@@ -1983,151 +2063,211 @@ def main():
                     
                     if patients:
                         st.success(f"✅ Extracted data for {len(patients)} patient(s)")
-                        
-                        # Show patients grouped by MRN
+                        st.info("📝 **Edit Mode**: You can modify any extracted values before importing. Changes are saved when you click 'Confirm & Import'.")
+
+                        # Initialize edit session state if not exists
+                        if 'pdf_edit_data' not in st.session_state:
+                            st.session_state.pdf_edit_data = {}
+
+                        # Show patients grouped by MRN with editable fields
                         for mrn, records in patients.items():
                             with st.expander(f"📋 Patient: {mrn} - {records[0]['patient_name']} ({len(records)} file(s))", expanded=True):
-                                # Show patient summary
-                                first_record = records[0]
-                                
-                                col1, col2, col3, col4 = st.columns(4)
-                                col1.metric("Name", first_record['patient_name'])
-                                col2.metric("MRN/File #", mrn)
-                                col3.metric("Age", first_record['age'] if first_record['age'] > 0 else "N/A")
-                                col4.metric("Weeks", first_record['weeks'] if first_record['weeks'] > 0 else "N/A")
-                                
                                 # Show all files for this patient
                                 for idx, record in enumerate(records, 1):
+                                    edit_key = f"{mrn}_{idx}"
+
+                                    # Initialize edit data from record if not exists
+                                    if edit_key not in st.session_state.pdf_edit_data:
+                                        st.session_state.pdf_edit_data[edit_key] = record.copy()
+
                                     st.markdown(f"**File {idx}: {record['source_file']}**")
-                                    
-                                    # Create comprehensive preview
-                                    preview_data = {
-                                        'Weight (kg)': record['weight'] if record['weight'] > 0 else 'N/A',
-                                        'Height (cm)': record['height'] if record['height'] > 0 else 'N/A',
-                                        'BMI': record['bmi'] if record['bmi'] > 0 else 'N/A',
-                                        'Panel': record['panel'],
-                                        'Reads (M)': record['reads'] if record['reads'] > 0 else 'N/A',
-                                        'Cff %': record['cff'] if record['cff'] > 0 else 'N/A',
-                                        'GC %': record['gc'] if record['gc'] > 0 else 'N/A',
-                                        'QS': record['qs'] if record['qs'] > 0 else 'N/A',
-                                        'Unique %': record['unique_rate'] if record['unique_rate'] > 0 else 'N/A',
-                                        'Error %': record['error_rate'] if record['error_rate'] > 0 else 'N/A',
-                                        'SCA Type': record['sca_type'],
-                                        'QC Status': record['qc_status'] if record['qc_status'] else 'N/A',
-                                        'Final Result': record['final_result'] if record['final_result'] else 'N/A',
-                                    }
-                                    
-                                    col_a, col_b = st.columns(2)
-                                    with col_a:
-                                        st.json(preview_data)
-                                    
-                                    with col_b:
-                                        # Show Z-scores
-                                        st.markdown("**Z-Scores:**")
-                                        z_display = {}
-                                        
-                                        # Main trisomies
-                                        for chrom in [21, 18, 13]:
-                                            if chrom in record['z_scores']:
-                                                z_display[f"Chr {chrom}"] = record['z_scores'][chrom]
-                                        
-                                        # All other autosomes
-                                        for chrom in range(1, 23):
-                                            if chrom not in [13, 18, 21] and chrom in record['z_scores']:
-                                                z_display[f"Chr {chrom}"] = record['z_scores'][chrom]
-                                        
-                                        # SCA
-                                        if 'XX' in record['z_scores']:
-                                            z_display['XX'] = record['z_scores']['XX']
-                                        if 'XY' in record['z_scores']:
-                                            z_display['XY'] = record['z_scores']['XY']
-                                        
-                                        if z_display:
-                                            st.json(z_display)
+
+                                    # Editable patient info
+                                    st.markdown("##### Patient Information")
+                                    p_col1, p_col2, p_col3, p_col4 = st.columns(4)
+                                    with p_col1:
+                                        st.session_state.pdf_edit_data[edit_key]['patient_name'] = st.text_input(
+                                            "Name", value=st.session_state.pdf_edit_data[edit_key]['patient_name'],
+                                            key=f"name_{edit_key}")
+                                    with p_col2:
+                                        st.session_state.pdf_edit_data[edit_key]['age'] = st.number_input(
+                                            "Age", min_value=15, max_value=60,
+                                            value=int(st.session_state.pdf_edit_data[edit_key]['age']) if st.session_state.pdf_edit_data[edit_key]['age'] > 0 else 30,
+                                            key=f"age_{edit_key}")
+                                    with p_col3:
+                                        st.session_state.pdf_edit_data[edit_key]['weeks'] = st.number_input(
+                                            "Weeks", min_value=9, max_value=24,
+                                            value=int(st.session_state.pdf_edit_data[edit_key]['weeks']) if st.session_state.pdf_edit_data[edit_key]['weeks'] > 0 else 12,
+                                            key=f"weeks_{edit_key}")
+                                    with p_col4:
+                                        st.session_state.pdf_edit_data[edit_key]['panel'] = st.selectbox(
+                                            "Panel", ["NIPT Basic", "NIPT Standard", "NIPT Plus", "NIPT Pro"],
+                                            index=["NIPT Basic", "NIPT Standard", "NIPT Plus", "NIPT Pro"].index(
+                                                st.session_state.pdf_edit_data[edit_key]['panel']) if st.session_state.pdf_edit_data[edit_key]['panel'] in ["NIPT Basic", "NIPT Standard", "NIPT Plus", "NIPT Pro"] else 1,
+                                            key=f"panel_{edit_key}")
+
+                                    # Editable physical measurements
+                                    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+                                    with m_col1:
+                                        st.session_state.pdf_edit_data[edit_key]['weight'] = st.number_input(
+                                            "Weight (kg)", min_value=30.0, max_value=200.0,
+                                            value=float(st.session_state.pdf_edit_data[edit_key]['weight']) if st.session_state.pdf_edit_data[edit_key]['weight'] > 0 else 65.0,
+                                            key=f"weight_{edit_key}")
+                                    with m_col2:
+                                        st.session_state.pdf_edit_data[edit_key]['height'] = st.number_input(
+                                            "Height (cm)", min_value=100, max_value=220,
+                                            value=int(st.session_state.pdf_edit_data[edit_key]['height']) if st.session_state.pdf_edit_data[edit_key]['height'] > 0 else 165,
+                                            key=f"height_{edit_key}")
+                                    with m_col3:
+                                        # Auto-calculate BMI
+                                        if st.session_state.pdf_edit_data[edit_key]['weight'] > 0 and st.session_state.pdf_edit_data[edit_key]['height'] > 0:
+                                            calc_bmi = round(st.session_state.pdf_edit_data[edit_key]['weight'] /
+                                                           ((st.session_state.pdf_edit_data[edit_key]['height']/100)**2), 1)
+                                            st.session_state.pdf_edit_data[edit_key]['bmi'] = calc_bmi
+                                            st.metric("BMI (auto)", calc_bmi)
                                         else:
-                                            st.caption("No Z-scores found")
-                                        
-                                        # CNV findings
-                                        if record['cnv_findings']:
-                                            st.markdown("**CNV Findings:**")
-                                            for cnv in record['cnv_findings']:
-                                                st.caption(f"• Size: {cnv['size']} Mb, Ratio: {cnv['ratio']}%")
-                                        
-                                        # RAT findings
-                                        if record['rat_findings']:
-                                            st.markdown("**RAT Findings:**")
-                                            for rat in record['rat_findings']:
-                                                st.caption(f"• Chr {rat['chr']}: Z = {rat['z']}")
-                                    
-                                    if record['notes']:
-                                        st.caption(f"**Notes:** {record['notes']}")
-                                    
+                                            st.metric("BMI", "N/A")
+                                    with m_col4:
+                                        st.session_state.pdf_edit_data[edit_key]['sca_type'] = st.selectbox(
+                                            "SCA Type", ["XX", "XY", "XO", "XXX", "XXY", "XYY"],
+                                            index=["XX", "XY", "XO", "XXX", "XXY", "XYY"].index(
+                                                st.session_state.pdf_edit_data[edit_key]['sca_type']) if st.session_state.pdf_edit_data[edit_key]['sca_type'] in ["XX", "XY", "XO", "XXX", "XXY", "XYY"] else 0,
+                                            key=f"sca_{edit_key}")
+
+                                    # Editable QC metrics
+                                    st.markdown("##### Sequencing Metrics")
+                                    q_col1, q_col2, q_col3, q_col4, q_col5, q_col6 = st.columns(6)
+                                    with q_col1:
+                                        st.session_state.pdf_edit_data[edit_key]['reads'] = st.number_input(
+                                            "Reads (M)", min_value=0.0, max_value=100.0,
+                                            value=float(st.session_state.pdf_edit_data[edit_key]['reads']) if st.session_state.pdf_edit_data[edit_key]['reads'] > 0 else 10.0,
+                                            key=f"reads_{edit_key}")
+                                    with q_col2:
+                                        st.session_state.pdf_edit_data[edit_key]['cff'] = st.number_input(
+                                            "Cff %", min_value=0.0, max_value=50.0,
+                                            value=float(st.session_state.pdf_edit_data[edit_key]['cff']) if st.session_state.pdf_edit_data[edit_key]['cff'] > 0 else 10.0,
+                                            key=f"cff_{edit_key}")
+                                    with q_col3:
+                                        st.session_state.pdf_edit_data[edit_key]['gc'] = st.number_input(
+                                            "GC %", min_value=0.0, max_value=100.0,
+                                            value=float(st.session_state.pdf_edit_data[edit_key]['gc']) if st.session_state.pdf_edit_data[edit_key]['gc'] > 0 else 41.0,
+                                            key=f"gc_{edit_key}")
+                                    with q_col4:
+                                        st.session_state.pdf_edit_data[edit_key]['qs'] = st.number_input(
+                                            "QS", min_value=0.0, max_value=10.0,
+                                            value=float(st.session_state.pdf_edit_data[edit_key]['qs']) if st.session_state.pdf_edit_data[edit_key]['qs'] > 0 else 1.0,
+                                            key=f"qs_{edit_key}")
+                                    with q_col5:
+                                        st.session_state.pdf_edit_data[edit_key]['unique_rate'] = st.number_input(
+                                            "Unique %", min_value=0.0, max_value=100.0,
+                                            value=float(st.session_state.pdf_edit_data[edit_key]['unique_rate']) if st.session_state.pdf_edit_data[edit_key]['unique_rate'] > 0 else 80.0,
+                                            key=f"unique_{edit_key}")
+                                    with q_col6:
+                                        st.session_state.pdf_edit_data[edit_key]['error_rate'] = st.number_input(
+                                            "Error %", min_value=0.0, max_value=10.0,
+                                            value=float(st.session_state.pdf_edit_data[edit_key]['error_rate']) if st.session_state.pdf_edit_data[edit_key]['error_rate'] > 0 else 0.2,
+                                            key=f"error_{edit_key}")
+
+                                    # Editable Z-scores for main trisomies
+                                    st.markdown("##### Z-Scores (Trisomies)")
+                                    z_col1, z_col2, z_col3, z_col4, z_col5 = st.columns(5)
+                                    z_scores = st.session_state.pdf_edit_data[edit_key].get('z_scores', {})
+                                    with z_col1:
+                                        z_scores[21] = st.number_input("Z-21", min_value=-10.0, max_value=20.0,
+                                            value=float(z_scores.get(21, 0.0)), key=f"z21_{edit_key}", format="%.2f")
+                                    with z_col2:
+                                        z_scores[18] = st.number_input("Z-18", min_value=-10.0, max_value=20.0,
+                                            value=float(z_scores.get(18, 0.0)), key=f"z18_{edit_key}", format="%.2f")
+                                    with z_col3:
+                                        z_scores[13] = st.number_input("Z-13", min_value=-10.0, max_value=20.0,
+                                            value=float(z_scores.get(13, 0.0)), key=f"z13_{edit_key}", format="%.2f")
+                                    with z_col4:
+                                        z_scores['XX'] = st.number_input("Z-XX", min_value=-10.0, max_value=20.0,
+                                            value=float(z_scores.get('XX', 0.0)), key=f"zxx_{edit_key}", format="%.2f")
+                                    with z_col5:
+                                        z_scores['XY'] = st.number_input("Z-XY", min_value=-10.0, max_value=20.0,
+                                            value=float(z_scores.get('XY', 0.0)), key=f"zxy_{edit_key}", format="%.2f")
+                                    st.session_state.pdf_edit_data[edit_key]['z_scores'] = z_scores
+
+                                    # Clinical notes - editable
+                                    st.session_state.pdf_edit_data[edit_key]['notes'] = st.text_area(
+                                        "Clinical Notes (e.g., nuchal translucency, ultrasound findings)",
+                                        value=st.session_state.pdf_edit_data[edit_key].get('notes', ''),
+                                        key=f"notes_{edit_key}",
+                                        help="Enter clinical observations like NT measurements, ultrasound findings, etc.")
+
+                                    # Show CNV/RAT findings (read-only for now)
+                                    if record['cnv_findings'] or record['rat_findings']:
+                                        with st.expander("View CNV/RAT Findings"):
+                                            if record['cnv_findings']:
+                                                st.markdown("**CNV Findings:**")
+                                                for cnv in record['cnv_findings']:
+                                                    st.caption(f"• Size: {cnv['size']} Mb, Ratio: {cnv['ratio']}%")
+                                            if record['rat_findings']:
+                                                st.markdown("**RAT Findings:**")
+                                                for rat in record['rat_findings']:
+                                                    st.caption(f"• Chr {rat['chr']}: Z = {rat['z']}")
+
                                     st.divider()
-                        
-                        # Store in session state
+
+                        # Store in session state - use edited data
                         st.session_state.pdf_import_data = patients
-                        
-                        st.warning("⚠️ Review all extracted data above before importing")
+
+                        st.warning("⚠️ Review and edit all extracted data above before importing")
                         
                         col1, col2 = st.columns(2)
                         with col1:
                             if st.button("✅ Confirm & Import All to Registry", type="primary"):
                                 success, fail = 0, 0
                                 config = load_config()
-                                
+
                                 for mrn, records in patients.items():
-                                    for data in records:
+                                    for idx, original_data in enumerate(records, 1):
                                         try:
-                                            # Get Z-scores
+                                            # Use edited data from session state if available
+                                            edit_key = f"{mrn}_{idx}"
+                                            data = st.session_state.pdf_edit_data.get(edit_key, original_data)
+
+                                            # Get Z-scores from edited data
                                             z_21 = data['z_scores'].get(21, 0.0)
                                             z_18 = data['z_scores'].get(18, 0.0)
                                             z_13 = data['z_scores'].get(13, 0.0)
                                             z_xx = data['z_scores'].get('XX', 0.0)
                                             z_xy = data['z_scores'].get('XY', 0.0)
-                                            
-                                            # Analyze
+
+                                            # Analyze with edited values
                                             t21, _ = analyze_trisomy(config, z_21, "21")
                                             t18, _ = analyze_trisomy(config, z_18, "18")
                                             t13, _ = analyze_trisomy(config, z_13, "13")
-                                            sca, _ = analyze_sca(config, data['sca_type'], z_xx, z_xy, 
+                                            sca, _ = analyze_sca(config, data['sca_type'], z_xx, z_xy,
                                                                data['cff'] if data['cff'] > 0 else 10.0)
-                                            
-                                            # Process CNVs
+
+                                            # Process CNVs from original data (not editable currently)
                                             analyzed_cnvs = []
-                                            for cnv in data['cnv_findings']:
+                                            for cnv in original_data.get('cnv_findings', []):
                                                 msg, _, _ = analyze_cnv(cnv['size'], cnv['ratio'])
                                                 analyzed_cnvs.append(f"{cnv['size']}Mb ({cnv['ratio']}%) -> {msg}")
-                                            
-                                            # Process RATs
+
+                                            # Process RATs from original data
                                             analyzed_rats = []
-                                            for rat in data['rat_findings']:
+                                            for rat in original_data.get('rat_findings', []):
                                                 msg, _ = analyze_rat(config, rat['chr'], rat['z'])
                                                 analyzed_rats.append(f"Chr {rat['chr']} (Z:{rat['z']}) -> {msg}")
-                                            
-                                            # QC
-                                            if data['qc_status']:
-                                                qc_s = data['qc_status']
-                                                qc_m = ["Imported from PDF"]
-                                                qc_a = "Verify QC details"
-                                            else:
-                                                # Run QC if we have metrics
-                                                if data['reads'] > 0 and data['cff'] > 0:
-                                                    qc_s, qc_m, qc_a = check_qc_metrics(
-                                                        config, data['panel'], data['reads'], data['cff'],
-                                                        data['gc'], data['qs'], data['unique_rate'],
-                                                        data['error_rate'], False
-                                                    )
-                                                else:
-                                                    qc_s, qc_m, qc_a = "PASS", ["Imported from PDF"], "None"
-                                            
-                                            # Final result
-                                            if data['final_result']:
-                                                final = data['final_result']
-                                            else:
-                                                final = "NEGATIVE"
-                                                if "POSITIVE" in (t21 + t18 + t13 + sca):
-                                                    final = "POSITIVE DETECTED"
-                                            
+
+                                            # Run QC with edited metrics
+                                            qc_s, qc_m, qc_a = check_qc_metrics(
+                                                config, data['panel'], data['reads'], data['cff'],
+                                                data['gc'], data['qs'], data['unique_rate'],
+                                                data['error_rate'], False
+                                            )
+
+                                            # Determine final result
+                                            final = "NEGATIVE"
+                                            if "POSITIVE" in (t21 + t18 + t13 + sca):
+                                                final = "POSITIVE DETECTED"
+                                            if qc_s == "FAIL":
+                                                final = "INVALID (QC FAIL)"
+
                                             p_data = {
                                                 'name': data['patient_name'],
                                                 'id': mrn,
@@ -2136,16 +2276,16 @@ def main():
                                                 'height': data['height'],
                                                 'bmi': data['bmi'],
                                                 'weeks': data['weeks'],
-                                                'notes': f"Imported from: {data['source_file']}. {data['notes']}"
+                                                'notes': f"Imported from: {original_data.get('source_file', 'PDF')}. {data.get('notes', '')}"
                                             }
-                                            
+
                                             r_data = {
                                                 'panel': data['panel'],
                                                 'qc_status': qc_s,
                                                 'qc_msgs': qc_m,
                                                 'qc_advice': qc_a
                                             }
-                                            
+
                                             c_data = {
                                                 't21': t21,
                                                 't18': t18,
@@ -2155,28 +2295,33 @@ def main():
                                                 'rat_list': analyzed_rats,
                                                 'final': final
                                             }
-                                            
-                                            # Build full Z-score dictionary
+
+                                            # Build full Z-score dictionary from edited data
                                             full_z = data['z_scores'].copy()
-                                            
+
                                             save_result(p_data, r_data, c_data, full_z)
                                             success += 1
-                                            
+
                                         except Exception as e:
                                             st.error(f"Failed to import {data.get('patient_name', 'Unknown')}: {e}")
                                             fail += 1
-                                
+
                                 st.success(f"✅ Import Complete: {success} records imported, {fail} failed")
-                                log_audit("PDF_IMPORT", f"Imported {success} records from {len(uploaded_pdfs)} PDFs", 
+                                log_audit("PDF_IMPORT", f"Imported {success} records from {len(uploaded_pdfs)} PDFs",
                                          st.session_state.user['id'])
-                                
+
+                                # Clean up session state
                                 if 'pdf_import_data' in st.session_state:
                                     del st.session_state.pdf_import_data
-                        
+                                if 'pdf_edit_data' in st.session_state:
+                                    del st.session_state.pdf_edit_data
+
                         with col2:
                             if st.button("❌ Cancel"):
                                 if 'pdf_import_data' in st.session_state:
                                     del st.session_state.pdf_import_data
+                                if 'pdf_edit_data' in st.session_state:
+                                    del st.session_state.pdf_edit_data
                                 st.rerun()
                     else:
                         st.error("❌ Could not extract data from any PDFs")
@@ -2191,13 +2336,19 @@ def main():
             - ✅ CNV findings with size and ratio
             - ✅ RAT findings with chromosome and Z-score
             - ✅ QC status and final results
-            - ✅ Clinical notes
-            
+            - ✅ Clinical notes (nuchal translucency, ultrasound findings, etc.)
+
+            **📝 Edit Before Import:**
+            - All extracted values are **editable** before import
+            - Modify patient info, sequencing metrics, Z-scores
+            - Add clinical notes including NT measurements
+            - BMI auto-calculates from weight/height
+
             **📁 Intelligent Grouping:**
             - Files are automatically grouped by **Patient MRN/File Number**
             - Multiple reports for the same patient are shown together
             - Each file is processed separately but organized by patient
-            
+
             **⚠️ Requirements:**
             - PDFs must contain **searchable text** (not scanned images)
             - Patient MRN/File Number must be present for grouping
