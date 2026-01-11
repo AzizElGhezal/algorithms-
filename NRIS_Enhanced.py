@@ -353,13 +353,32 @@ def delete_record(report_id: int) -> Tuple[bool, str]:
 # ==================== PDF IMPORT FUNCTIONS ====================
 
 def extract_data_from_pdf(pdf_file, filename: str = "") -> Optional[Dict]:
-    """Extract comprehensive patient and test data from PDF report."""
+    """Extract comprehensive patient and test data from PDF report.
+
+    Extracts:
+    - Patient demographics (name, MRN, age, weight, height, BMI, gestational weeks)
+    - Sample information (collection date, laboratory, referring physician)
+    - Pregnancy information (singleton/multiple, indication for testing)
+    - Sequencing metrics (reads, Cff, GC%, QS, unique rate, error rate)
+    - Z-scores for all 22 autosomes plus sex chromosomes
+    - SCA type detection with karyotype patterns
+    - CNV findings with size, ratio, and chromosomal location
+    - RAT findings with chromosome and Z-score
+    - QC status and final interpretation
+    - Clinical notes and recommendations
+    """
     try:
         pdf_reader = PyPDF2.PdfReader(pdf_file)
         text = ""
         for page in pdf_reader.pages:
-            text += page.extract_text()
-        
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+
+        # Clean up text - normalize whitespace and line endings
+        text = re.sub(r'\s+', ' ', text)
+        text_lines = text.replace('. ', '.\n').replace(': ', ': ')
+
         # Initialize comprehensive data structure
         data = {
             'source_file': filename,
@@ -383,239 +402,590 @@ def extract_data_from_pdf(pdf_file, filename: str = "") -> Optional[Dict]:
             'rat_findings': [],
             'qc_status': '',
             'final_result': '',
-            'notes': ''
+            'notes': '',
+            # New comprehensive fields
+            'sample_date': '',
+            'report_date': '',
+            'laboratory': '',
+            'referring_physician': '',
+            'indication': '',
+            'pregnancy_type': 'Singleton',
+            'sample_type': '',
+            'fetal_sex': '',
+            'risk_t21': '',
+            'risk_t18': '',
+            'risk_t13': '',
+            'sensitivity_t21': '',
+            'specificity_t21': '',
+            'ppv_t21': '',
+            'npv_t21': '',
+            'microdeletion_results': [],
+            'extraction_confidence': 'HIGH'
         }
-        
+
         # ===== PATIENT DEMOGRAPHICS =====
-        # Extract patient name (multiple patterns)
+        # Extract patient name (multiple patterns for different report formats)
         name_patterns = [
-            r'(?:Patient|Name)[:\s]+([A-Za-z\s\-\']+?)(?:\n|MRN|ID|Age|\||$)',
-            r'Full\s+Name[:\s]+([A-Za-z\s\-\']+?)(?:\n|MRN)',
+            r'(?:Patient|Patient\s+Name|Name)[:\s]+([A-Za-z][A-Za-z\s\-\'\.]+?)(?:\s*(?:MRN|ID|Age|DOB|Date|\||,|\n|$))',
+            r'Full\s+Name[:\s]+([A-Za-z][A-Za-z\s\-\'\.]+?)(?:\s*(?:MRN|\n|$))',
+            r'Name\s*:\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)',
+            r'(?:Mrs?\.?|Ms\.?|Dr\.?)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)',
         ]
         for pattern in name_patterns:
             name_match = re.search(pattern, text, re.IGNORECASE)
             if name_match:
-                data['patient_name'] = name_match.group(1).strip()
-                break
-        
+                name = name_match.group(1).strip()
+                # Clean up name - remove trailing numbers, special chars
+                name = re.sub(r'[\d\|\,]+$', '', name).strip()
+                if len(name) > 2 and ' ' in name or len(name) > 5:
+                    data['patient_name'] = name
+                    break
+
         # Extract MRN / Patient ID (multiple patterns)
         mrn_patterns = [
-            r'MRN[:\s]+([A-Za-z0-9\-]+)',
-            r'(?:Patient\s+)?ID[:\s]+([A-Za-z0-9\-]+)',
-            r'File\s+(?:Number|No)[:\s]+([A-Za-z0-9\-]+)',
+            r'MRN[:\s#]+([A-Za-z0-9\-]+)',
+            r'Medical\s+Record\s+(?:Number|No\.?)[:\s]+([A-Za-z0-9\-]+)',
+            r'(?:Patient\s+)?ID[:\s#]+([A-Za-z0-9\-]{4,})',
+            r'File\s+(?:Number|No\.?)[:\s]+([A-Za-z0-9\-]+)',
+            r'Accession[:\s#]+([A-Za-z0-9\-]+)',
+            r'Sample\s+ID[:\s]+([A-Za-z0-9\-]+)',
+            r'Case\s+(?:Number|No\.?|ID)[:\s]+([A-Za-z0-9\-]+)',
         ]
         for pattern in mrn_patterns:
             mrn_match = re.search(pattern, text, re.IGNORECASE)
             if mrn_match:
                 data['mrn'] = mrn_match.group(1).strip()
                 break
-        
-        # Extract age
-        age_match = re.search(r'Age[:\s]+(\d+)', text, re.IGNORECASE)
-        if age_match:
-            data['age'] = int(age_match.group(1))
-        
-        # Extract weight
-        weight_match = re.search(r'Weight[:\s]+(\d+\.?\d*)\s*(?:kg|KG)', text, re.IGNORECASE)
-        if weight_match:
-            data['weight'] = float(weight_match.group(1))
-        
-        # Extract height
-        height_match = re.search(r'Height[:\s]+(\d+)\s*(?:cm|CM)', text, re.IGNORECASE)
-        if height_match:
-            data['height'] = int(height_match.group(1))
-        
+
+        # Extract age (with validation)
+        age_patterns = [
+            r'(?:Maternal\s+)?Age[:\s]+(\d{1,2})\s*(?:years?|yrs?|y)?(?:\s|,|\.|$)',
+            r'Age\s*\((?:years?|yrs?)\)[:\s]+(\d{1,2})',
+            r'(\d{2})\s*(?:years?|yrs?)\s+old',
+        ]
+        for pattern in age_patterns:
+            age_match = re.search(pattern, text, re.IGNORECASE)
+            if age_match:
+                age = int(age_match.group(1))
+                if 15 <= age <= 60:  # Reasonable maternal age range
+                    data['age'] = age
+                    break
+
+        # Extract weight (with unit conversion if needed)
+        weight_patterns = [
+            r'Weight[:\s]+(\d+\.?\d*)\s*(?:kg|KG|kilograms?)',
+            r'Weight[:\s]+(\d+\.?\d*)\s*(?:lbs?|pounds?)',  # Will need conversion
+            r'(?:Maternal\s+)?Weight[:\s]+(\d+\.?\d*)',
+        ]
+        for pattern in weight_patterns:
+            weight_match = re.search(pattern, text, re.IGNORECASE)
+            if weight_match:
+                weight = float(weight_match.group(1))
+                # Convert lbs to kg if detected
+                if 'lb' in pattern.lower() or weight > 150:
+                    weight = weight * 0.453592
+                if 30 <= weight <= 200:  # Reasonable weight range in kg
+                    data['weight'] = round(weight, 1)
+                    break
+
+        # Extract height (with unit conversion if needed)
+        height_patterns = [
+            r'Height[:\s]+(\d{2,3})\s*(?:cm|CM|centimeters?)',
+            r'Height[:\s]+(\d)[\'′](\d{1,2})[\"″]?',  # feet'inches" format
+            r'(?:Maternal\s+)?Height[:\s]+(\d{2,3})',
+        ]
+        for pattern in height_patterns:
+            height_match = re.search(pattern, text, re.IGNORECASE)
+            if height_match:
+                if "'" in pattern or "′" in pattern:
+                    # Convert feet/inches to cm
+                    feet = int(height_match.group(1))
+                    inches = int(height_match.group(2)) if height_match.group(2) else 0
+                    height = int((feet * 12 + inches) * 2.54)
+                else:
+                    height = int(height_match.group(1))
+                if 100 <= height <= 220:  # Reasonable height range in cm
+                    data['height'] = height
+                    break
+
         # Extract BMI
-        bmi_match = re.search(r'BMI[:\s]+(\d+\.?\d*)', text, re.IGNORECASE)
-        if bmi_match:
-            data['bmi'] = float(bmi_match.group(1))
-        
+        bmi_patterns = [
+            r'BMI[:\s]+(\d+\.?\d*)',
+            r'Body\s+Mass\s+Index[:\s]+(\d+\.?\d*)',
+        ]
+        for pattern in bmi_patterns:
+            bmi_match = re.search(pattern, text, re.IGNORECASE)
+            if bmi_match:
+                bmi = float(bmi_match.group(1))
+                if 15 <= bmi <= 60:  # Reasonable BMI range
+                    data['bmi'] = round(bmi, 1)
+                    break
+
+        # Calculate BMI if weight and height available but BMI not extracted
+        if not data['bmi'] and data['weight'] > 0 and data['height'] > 0:
+            data['bmi'] = round(data['weight'] / ((data['height']/100)**2), 1)
+
         # Extract gestational weeks (multiple patterns)
         weeks_patterns = [
-            r'(?:Gestational\s+Age|Gest\.\s+Age|Weeks)[:\s]+(\d+)\s*(?:weeks?|wks?)?',
-            r'(\d+)\s*weeks?\s*(?:gestation|pregnant)',
+            r'(?:Gestational\s+Age|Gest\.?\s+Age|GA)[:\s]+(\d{1,2})\s*(?:\+\s*\d+)?(?:\s*weeks?|\s*wks?)?',
+            r'(\d{1,2})\s*(?:\+\s*\d+)?\s*weeks?\s*(?:gestation|pregnant|GA)',
+            r'Weeks?\s*(?:of\s+)?(?:Gestation|Pregnancy)[:\s]+(\d{1,2})',
+            r'(?:at\s+)?(\d{1,2})\s*weeks?\s*(?:gestation)?',
         ]
         for pattern in weeks_patterns:
             weeks_match = re.search(pattern, text, re.IGNORECASE)
             if weeks_match:
-                data['weeks'] = int(weeks_match.group(1))
+                weeks = int(weeks_match.group(1))
+                if 9 <= weeks <= 42:  # Reasonable gestational age for NIPT
+                    data['weeks'] = weeks
+                    break
+
+        # ===== SAMPLE & REPORT INFORMATION =====
+        # Extract sample collection date
+        date_patterns = [
+            r'(?:Sample|Collection|Draw)\s+Date[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})',
+            r'(?:Date\s+)?(?:Collected|Drawn)[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})',
+            r'Collection[:\s]+(\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})',
+        ]
+        for pattern in date_patterns:
+            date_match = re.search(pattern, text, re.IGNORECASE)
+            if date_match:
+                data['sample_date'] = date_match.group(1).strip()
                 break
-        
+
+        # Extract report date
+        report_date_patterns = [
+            r'(?:Report|Reported)\s+Date[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})',
+            r'Date\s+(?:of\s+)?Report[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})',
+        ]
+        for pattern in report_date_patterns:
+            date_match = re.search(pattern, text, re.IGNORECASE)
+            if date_match:
+                data['report_date'] = date_match.group(1).strip()
+                break
+
+        # Extract laboratory name
+        lab_patterns = [
+            r'(?:Laboratory|Lab)[:\s]+([A-Za-z][A-Za-z\s\-&]+?)(?:\n|$|Address)',
+            r'Performed\s+(?:at|by)[:\s]+([A-Za-z][A-Za-z\s\-&]+?)(?:\n|$)',
+            r'([A-Za-z]+\s+(?:Genetics|Genomics|Laboratory|Lab|Diagnostics)(?:\s+[A-Za-z]+)?)',
+        ]
+        for pattern in lab_patterns:
+            lab_match = re.search(pattern, text, re.IGNORECASE)
+            if lab_match:
+                data['laboratory'] = lab_match.group(1).strip()[:100]
+                break
+
+        # Extract referring physician
+        physician_patterns = [
+            r'(?:Referring|Ordering)\s+(?:Physician|Provider|Doctor|MD)[:\s]+(?:Dr\.?\s+)?([A-Za-z][A-Za-z\s\-\.]+)',
+            r'Physician[:\s]+(?:Dr\.?\s+)?([A-Za-z][A-Za-z\s\-\.]+?)(?:\n|$|,)',
+            r'Ordered\s+[Bb]y[:\s]+(?:Dr\.?\s+)?([A-Za-z][A-Za-z\s\-\.]+)',
+        ]
+        for pattern in physician_patterns:
+            phys_match = re.search(pattern, text, re.IGNORECASE)
+            if phys_match:
+                data['referring_physician'] = phys_match.group(1).strip()[:100]
+                break
+
+        # Extract indication for testing
+        indication_patterns = [
+            r'(?:Indication|Reason)[:\s]+(.+?)(?:\n|$|Panel|Test)',
+            r'(?:Clinical\s+)?Indication[:\s]+(.+?)(?:\n|$)',
+            r'Referred\s+for[:\s]+(.+?)(?:\n|$)',
+        ]
+        for pattern in indication_patterns:
+            ind_match = re.search(pattern, text, re.IGNORECASE)
+            if ind_match:
+                data['indication'] = ind_match.group(1).strip()[:200]
+                break
+
+        # Extract pregnancy type (singleton/twin/multiple)
+        if re.search(r'(?:twin|twins|multiple|dichorionic|monochorionic|dizygotic|monozygotic)', text, re.IGNORECASE):
+            data['pregnancy_type'] = 'Multiple'
+        elif re.search(r'singleton', text, re.IGNORECASE):
+            data['pregnancy_type'] = 'Singleton'
+
+        # Extract sample type
+        sample_patterns = [
+            r'(?:Sample|Specimen)\s+Type[:\s]+([A-Za-z\s]+?)(?:\n|$|,)',
+            r'(?:Blood|Plasma|Serum|cfDNA)',
+        ]
+        for pattern in sample_patterns:
+            sample_match = re.search(pattern, text, re.IGNORECASE)
+            if sample_match:
+                data['sample_type'] = sample_match.group(1).strip() if sample_match.lastindex else sample_match.group(0)
+                break
+
         # ===== SEQUENCING METRICS =====
         # Extract panel type
         panel_patterns = [
             r'Panel[:\s]+(NIPT\s+\w+)',
-            r'Test\s+Type[:\s]+(NIPT\s+\w+)',
+            r'Test\s+(?:Type|Name)[:\s]+(NIPT\s+\w+)',
+            r'(NIPT\s+(?:Basic|Standard|Plus|Pro|Extended|Expanded))',
+            r'(?:Panorama|Harmony|MaterniT21|verifi|NIFTY|Natera)',  # Common brand names
         ]
         for pattern in panel_patterns:
             panel_match = re.search(pattern, text, re.IGNORECASE)
             if panel_match:
-                data['panel'] = panel_match.group(1).strip()
+                panel = panel_match.group(1).strip()
+                # Normalize panel name
+                if any(kw in panel.lower() for kw in ['expanded', 'extended', 'plus', 'comprehensive']):
+                    data['panel'] = 'NIPT Plus'
+                elif any(kw in panel.lower() for kw in ['pro', 'genome', 'full']):
+                    data['panel'] = 'NIPT Pro'
+                elif 'basic' in panel.lower():
+                    data['panel'] = 'NIPT Basic'
+                else:
+                    data['panel'] = 'NIPT Standard'
                 break
-        
-        # Extract sequencing metrics
-        reads_match = re.search(r'Reads?[:\s]+(\d+\.?\d*)\s*M?', text, re.IGNORECASE)
-        if reads_match:
-            data['reads'] = float(reads_match.group(1))
-        
+
+        # Extract sequencing reads
+        reads_patterns = [
+            r'(?:Total\s+)?Reads?[:\s]+(\d+\.?\d*)\s*(?:M|million)',
+            r'(?:Sequencing\s+)?Reads?[:\s]+(\d+\.?\d*)',
+            r'(\d+\.?\d*)\s*(?:M|million)\s+reads?',
+        ]
+        for pattern in reads_patterns:
+            reads_match = re.search(pattern, text, re.IGNORECASE)
+            if reads_match:
+                reads = float(reads_match.group(1))
+                if reads > 100:  # Likely in raw number, convert to millions
+                    reads = reads / 1000000
+                if 0.1 <= reads <= 100:  # Reasonable range
+                    data['reads'] = round(reads, 2)
+                    break
+
+        # Extract fetal fraction (Cff)
         cff_patterns = [
-            r'(?:Cff|Fetal\s+Fraction)[:\s]+(\d+\.?\d*)\s*%?',
-            r'FF[:\s]+(\d+\.?\d*)\s*%?',
+            r'(?:Cff|FF|Fetal\s+Fraction|cfDNA\s+Fraction)[:\s]+(\d+\.?\d*)\s*%?',
+            r'Fetal\s+(?:DNA\s+)?Fraction[:\s]+(\d+\.?\d*)',
+            r'(\d+\.?\d*)\s*%?\s*(?:fetal\s+fraction|FF)',
         ]
         for pattern in cff_patterns:
             cff_match = re.search(pattern, text, re.IGNORECASE)
             if cff_match:
-                data['cff'] = float(cff_match.group(1))
-                break
-        
-        gc_match = re.search(r'GC[:\s]+(\d+\.?\d*)\s*%?', text, re.IGNORECASE)
-        if gc_match:
-            data['gc'] = float(gc_match.group(1))
-        
+                cff = float(cff_match.group(1))
+                if 0.5 <= cff <= 50:  # Reasonable fetal fraction range
+                    data['cff'] = round(cff, 2)
+                    break
+
+        # Extract GC content
+        gc_patterns = [
+            r'GC\s*(?:Content)?[:\s]+(\d+\.?\d*)\s*%?',
+            r'GC%[:\s]+(\d+\.?\d*)',
+        ]
+        for pattern in gc_patterns:
+            gc_match = re.search(pattern, text, re.IGNORECASE)
+            if gc_match:
+                gc = float(gc_match.group(1))
+                if 20 <= gc <= 80:  # Reasonable GC content range
+                    data['gc'] = round(gc, 2)
+                    break
+
+        # Extract quality score
         qs_patterns = [
             r'QS[:\s]+(\d+\.?\d*)',
             r'Quality\s+Score[:\s]+(\d+\.?\d*)',
+            r'(?:Data\s+)?Quality[:\s]+(\d+\.?\d*)',
         ]
         for pattern in qs_patterns:
             qs_match = re.search(pattern, text, re.IGNORECASE)
             if qs_match:
-                data['qs'] = float(qs_match.group(1))
-                break
-        
-        unique_match = re.search(r'Unique(?:\s+Rate)?[:\s]+(\d+\.?\d*)\s*%?', text, re.IGNORECASE)
-        if unique_match:
-            data['unique_rate'] = float(unique_match.group(1))
-        
-        error_match = re.search(r'Error(?:\s+Rate)?[:\s]+(\d+\.?\d*)\s*%?', text, re.IGNORECASE)
-        if error_match:
-            data['error_rate'] = float(error_match.group(1))
-        
+                qs = float(qs_match.group(1))
+                if 0 <= qs <= 10:  # Reasonable QS range
+                    data['qs'] = round(qs, 3)
+                    break
+
+        # Extract unique read rate
+        unique_patterns = [
+            r'Unique\s*(?:Read)?\s*(?:Rate)?[:\s]+(\d+\.?\d*)\s*%?',
+            r'Uniquely\s+Mapped[:\s]+(\d+\.?\d*)',
+            r'Mapping\s+Rate[:\s]+(\d+\.?\d*)',
+        ]
+        for pattern in unique_patterns:
+            unique_match = re.search(pattern, text, re.IGNORECASE)
+            if unique_match:
+                unique = float(unique_match.group(1))
+                if 0 <= unique <= 100:
+                    data['unique_rate'] = round(unique, 2)
+                    break
+
+        # Extract error rate
+        error_patterns = [
+            r'Error\s*(?:Rate)?[:\s]+(\d+\.?\d*)\s*%?',
+            r'Sequencing\s+Error[:\s]+(\d+\.?\d*)',
+        ]
+        for pattern in error_patterns:
+            error_match = re.search(pattern, text, re.IGNORECASE)
+            if error_match:
+                error = float(error_match.group(1))
+                if 0 <= error <= 10:
+                    data['error_rate'] = round(error, 3)
+                    break
+
         # ===== Z-SCORES (ALL AUTOSOMES) =====
-        # Extract Z-scores for main trisomies
+        # Extract Z-scores for main trisomies (13, 18, 21)
         for chrom in [13, 18, 21]:
             z_patterns = [
-                rf'(?:Z[-\s]?{chrom}|Chr\s*{chrom}\s*Z)[:\s]+(-?\d+\.?\d*)',
-                rf'Trisomy\s+{chrom}.*?(?:Z[-\s]?Score)?[:\s]+(-?\d+\.?\d*)',
+                rf'(?:Z[-\s]?{chrom}|Chr(?:omosome)?\s*{chrom}\s*Z)[:\s]+(-?\d+\.?\d*)',
+                rf'Trisomy\s+{chrom}.*?Z[-\s]?(?:Score)?[:\s]+(-?\d+\.?\d*)',
                 rf'T{chrom}.*?Z[:\s]+(-?\d+\.?\d*)',
+                rf'Chr(?:omosome)?\s*{chrom}[:\s]+.*?Z[:\s]+(-?\d+\.?\d*)',
+                rf'Z[-\s]?Score.*?{chrom}[:\s]+(-?\d+\.?\d*)',
             ]
             for pattern in z_patterns:
                 z_match = re.search(pattern, text, re.IGNORECASE)
                 if z_match:
-                    data['z_scores'][chrom] = float(z_match.group(1))
-                    break
-        
-        # Extract Z-scores for ALL autosomes (1-22, excluding 13, 18, 21 already captured)
+                    z_val = float(z_match.group(1))
+                    if -20 <= z_val <= 50:  # Reasonable Z-score range
+                        data['z_scores'][chrom] = round(z_val, 3)
+                        break
+
+        # Extract Z-scores for ALL other autosomes (1-22, excluding 13, 18, 21)
         for chrom in range(1, 23):
             if chrom in [13, 18, 21]:
-                continue  # Already captured
-            
+                continue  # Already captured above
+
             z_patterns = [
-                rf'(?:Z[-\s]?{chrom}|Chr\s*{chrom}\s*Z)[:\s]+(-?\d+\.?\d*)',
+                rf'(?:Z[-\s]?{chrom}|Chr(?:omosome)?\s*{chrom}\s*Z)[:\s]+(-?\d+\.?\d*)',
                 rf'Chromosome\s+{chrom}.*?Z[:\s]+(-?\d+\.?\d*)',
+                rf'Chr\s*{chrom}[:\s]+.*?(-?\d+\.?\d*)',
             ]
             for pattern in z_patterns:
                 z_match = re.search(pattern, text, re.IGNORECASE)
                 if z_match:
-                    data['z_scores'][chrom] = float(z_match.group(1))
-                    break
-        
-        # Extract SCA Z-scores
+                    z_val = float(z_match.group(1))
+                    if -20 <= z_val <= 50:
+                        data['z_scores'][chrom] = round(z_val, 3)
+                        break
+
+        # Extract SCA Z-scores (XX and XY)
         z_xx_patterns = [
             r'Z[-\s]?XX[:\s]+(-?\d+\.?\d*)',
             r'XX\s+Z[-\s]?Score[:\s]+(-?\d+\.?\d*)',
+            r'X[:\s]+.*?Z[:\s]+(-?\d+\.?\d*)',
         ]
         for pattern in z_xx_patterns:
             z_xx_match = re.search(pattern, text, re.IGNORECASE)
             if z_xx_match:
-                data['z_scores']['XX'] = float(z_xx_match.group(1))
-                break
-        
+                z_val = float(z_xx_match.group(1))
+                if -20 <= z_val <= 50:
+                    data['z_scores']['XX'] = round(z_val, 3)
+                    break
+
         z_xy_patterns = [
             r'Z[-\s]?XY[:\s]+(-?\d+\.?\d*)',
             r'XY\s+Z[-\s]?Score[:\s]+(-?\d+\.?\d*)',
+            r'Y[:\s]+.*?Z[:\s]+(-?\d+\.?\d*)',
         ]
         for pattern in z_xy_patterns:
             z_xy_match = re.search(pattern, text, re.IGNORECASE)
             if z_xy_match:
-                data['z_scores']['XY'] = float(z_xy_match.group(1))
-                break
-        
-        # ===== SCA TYPE DETECTION =====
+                z_val = float(z_xy_match.group(1))
+                if -20 <= z_val <= 50:
+                    data['z_scores']['XY'] = round(z_val, 3)
+                    break
+
+        # ===== SCA TYPE & FETAL SEX DETECTION =====
         sca_patterns = [
-            (r'Turner|Monosomy\s+X', 'XO'),
-            (r'Triple\s+X|XXX', 'XXX'),
-            (r'Klinefelter|XXY', 'XXY'),
-            (r'XYY|Jacob', 'XYY'),
-            (r'(?:Sex.*?Male|Gender.*?Male)(?!.*Female)', 'XY'),
-            (r'(?:Sex.*?Female|Gender.*?Female)', 'XX'),
+            (r'Turner|Monosomy\s+X|45[,\s]*X(?:O)?', 'XO'),
+            (r'Triple\s+X|Trisomy\s+X|47[,\s]*XXX', 'XXX'),
+            (r'Klinefelter|47[,\s]*XXY', 'XXY'),
+            (r'47[,\s]*XYY|Jacob(?:s)?(?:\s+syndrome)?', 'XYY'),
+            (r'(?:Fetal\s+)?Sex[:\s]+Male|(?:Fetal\s+)?Gender[:\s]+Male|XY\s+(?:Male|detected)|Y\s+chromosome\s+(?:detected|present)', 'XY'),
+            (r'(?:Fetal\s+)?Sex[:\s]+Female|(?:Fetal\s+)?Gender[:\s]+Female|XX\s+(?:Female|detected)|No\s+Y\s+chromosome', 'XX'),
         ]
         for pattern, sca_type in sca_patterns:
             if re.search(pattern, text, re.IGNORECASE):
                 data['sca_type'] = sca_type
+                # Also set fetal sex based on SCA type
+                if sca_type in ['XY', 'XXY', 'XYY']:
+                    data['fetal_sex'] = 'Male'
+                elif sca_type in ['XX', 'XO', 'XXX']:
+                    data['fetal_sex'] = 'Female'
                 break
-        
+
+        # Try to extract fetal sex separately if not determined
+        if not data['fetal_sex']:
+            sex_patterns = [
+                (r'(?:Fetal\s+)?Sex[:\s]+Male|(?:Male|Boy)\s+fetus', 'Male'),
+                (r'(?:Fetal\s+)?Sex[:\s]+Female|(?:Female|Girl)\s+fetus', 'Female'),
+                (r'Y\s+chromosome\s+(?:detected|present|positive)', 'Male'),
+                (r'Y\s+chromosome\s+(?:not\s+detected|absent|negative)', 'Female'),
+            ]
+            for pattern, sex in sex_patterns:
+                if re.search(pattern, text, re.IGNORECASE):
+                    data['fetal_sex'] = sex
+                    break
+
         # ===== CNV FINDINGS =====
-        # Look for CNV sections
-        cnv_section = re.search(r'CNV.*?:(.*?)(?:RAT|RARE|Final|$)', text, re.IGNORECASE | re.DOTALL)
-        if cnv_section:
-            cnv_text = cnv_section.group(1)
-            # Extract CNV entries (format: "Size: X.X Mb, Ratio: Y.Y%")
-            cnv_matches = re.finditer(r'(\d+\.?\d*)\s*(?:Mb|MB).*?(\d+\.?\d*)\s*%', cnv_text)
-            for match in cnv_matches:
-                size = float(match.group(1))
-                ratio = float(match.group(2))
-                data['cnv_findings'].append({'size': size, 'ratio': ratio})
-        
+        # Look for CNV sections with more comprehensive patterns
+        cnv_section_patterns = [
+            r'CNV[:\s]+(.+?)(?:RAT|Rare|Final|Interpretation|Result|$)',
+            r'Copy\s+Number\s+Variation[:\s]+(.+?)(?:RAT|Final|$)',
+            r'Microdeletion/Microduplication[:\s]+(.+?)(?:Final|$)',
+        ]
+        for section_pattern in cnv_section_patterns:
+            cnv_section = re.search(section_pattern, text, re.IGNORECASE | re.DOTALL)
+            if cnv_section:
+                cnv_text = cnv_section.group(1)
+
+                # Extract CNV entries with various formats
+                cnv_entry_patterns = [
+                    r'(\d+\.?\d*)\s*(?:Mb|MB|megabases?).*?(\d+\.?\d*)\s*%',
+                    r'(?:Size|Region)[:\s]+(\d+\.?\d*)\s*(?:Mb|MB).*?(?:Ratio|Score)[:\s]+(\d+\.?\d*)',
+                    r'Chr(?:omosome)?\s*(\d+)[pq]?\d*.*?(\d+\.?\d*)\s*(?:Mb|MB)',
+                ]
+                for pattern in cnv_entry_patterns:
+                    cnv_matches = re.finditer(pattern, cnv_text, re.IGNORECASE)
+                    for match in cnv_matches:
+                        try:
+                            size = float(match.group(1))
+                            ratio = float(match.group(2)) if match.lastindex >= 2 else 0
+                            if 0.1 <= size <= 200:  # Reasonable CNV size
+                                data['cnv_findings'].append({
+                                    'size': round(size, 2),
+                                    'ratio': round(ratio, 2)
+                                })
+                        except (ValueError, IndexError):
+                            continue
+                break
+
         # ===== RAT FINDINGS =====
         # Look for RAT/Rare Autosome sections
-        rat_section = re.search(r'(?:RAT|Rare.*?Autosome).*?:(.*?)(?:Final|CNV|Interpretation|$)', text, re.IGNORECASE | re.DOTALL)
-        if rat_section:
-            rat_text = rat_section.group(1)
-            # Extract RAT entries (format: "Chr X: Z-score Y.Y")
-            rat_matches = re.finditer(r'Chr(?:omosome)?\s*(\d+).*?Z.*?(-?\d+\.?\d*)', rat_text, re.IGNORECASE)
-            for match in rat_matches:
-                chrom = int(match.group(1))
-                z_score = float(match.group(2))
-                if chrom not in [13, 18, 21]:  # Exclude main trisomies
-                    data['rat_findings'].append({'chr': chrom, 'z': z_score})
-        
+        rat_section_patterns = [
+            r'(?:RAT|Rare\s+Auto(?:somal)?\s+Trisomy)[:\s]+(.+?)(?:Final|CNV|Interpretation|$)',
+            r'Other\s+(?:Chromosomal|Autosomal)\s+Findings[:\s]+(.+?)(?:Final|$)',
+        ]
+        for section_pattern in rat_section_patterns:
+            rat_section = re.search(section_pattern, text, re.IGNORECASE | re.DOTALL)
+            if rat_section:
+                rat_text = rat_section.group(1)
+
+                # Extract RAT entries
+                rat_entry_patterns = [
+                    r'Chr(?:omosome)?\s*(\d+).*?Z[-\s]?(?:Score)?[:\s]+(-?\d+\.?\d*)',
+                    r'Trisomy\s+(\d+).*?Z[:\s]+(-?\d+\.?\d*)',
+                ]
+                for pattern in rat_entry_patterns:
+                    rat_matches = re.finditer(pattern, rat_text, re.IGNORECASE)
+                    for match in rat_matches:
+                        try:
+                            chrom = int(match.group(1))
+                            z_score = float(match.group(2))
+                            if chrom not in [13, 18, 21] and 1 <= chrom <= 22:
+                                data['rat_findings'].append({
+                                    'chr': chrom,
+                                    'z': round(z_score, 3)
+                                })
+                        except (ValueError, IndexError):
+                            continue
+                break
+
+        # ===== MICRODELETION SYNDROMES =====
+        microdeletion_patterns = [
+            (r'22q11\.?2\s+(?:deletion|DiGeorge)', '22q11.2 Deletion (DiGeorge)'),
+            (r'1p36\s+deletion', '1p36 Deletion'),
+            (r'5p[-\s]?(?:deletion)?|Cri[- ]du[- ]Chat', '5p Deletion (Cri-du-Chat)'),
+            (r'15q11\.?2\s+(?:deletion)?|Prader[- ]Willi|Angelman', '15q11.2 Deletion (Prader-Willi/Angelman)'),
+            (r'4p[-\s]?(?:deletion)?|Wolf[- ]Hirschhorn', '4p Deletion (Wolf-Hirschhorn)'),
+        ]
+        for pattern, syndrome in microdeletion_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                # Check if positive or negative
+                context = re.search(rf'{pattern}.{{0,100}}(positive|negative|detected|not\s+detected|high\s+risk|low\s+risk)',
+                                   text, re.IGNORECASE)
+                if context:
+                    result = context.group(1).lower()
+                    is_positive = result in ['positive', 'detected', 'high risk']
+                    data['microdeletion_results'].append({
+                        'syndrome': syndrome,
+                        'result': 'Positive' if is_positive else 'Negative'
+                    })
+
         # ===== QC STATUS & RESULTS =====
         qc_patterns = [
             r'QC\s+Status[:\s]+(\w+)',
             r'Quality\s+Control[:\s]+(\w+)',
+            r'(?:Sample\s+)?Quality[:\s]+(PASS|FAIL|WARNING|ADEQUATE|INADEQUATE)',
         ]
         for pattern in qc_patterns:
             qc_match = re.search(pattern, text, re.IGNORECASE)
             if qc_match:
-                data['qc_status'] = qc_match.group(1).upper()
+                qc_val = qc_match.group(1).upper()
+                if qc_val in ['PASS', 'PASSED', 'ADEQUATE', 'ACCEPTABLE']:
+                    data['qc_status'] = 'PASS'
+                elif qc_val in ['FAIL', 'FAILED', 'INADEQUATE', 'REJECTED']:
+                    data['qc_status'] = 'FAIL'
+                else:
+                    data['qc_status'] = 'WARNING'
                 break
-        
-        # Extract final result
+
+        # Extract final result/interpretation
         result_patterns = [
-            r'Final\s+(?:Interpretation|Result|Call)[:\s]+([A-Z\s\(\)]+)',
-            r'Conclusion[:\s]+([A-Z\s\(\)]+)',
+            r'(?:Final\s+)?(?:Interpretation|Result|Conclusion)[:\s]+([A-Za-z\s\(\)\-]+?)(?:\.|$|\n)',
+            r'(?:Overall\s+)?(?:Risk|Assessment)[:\s]+((?:Low|High|Positive|Negative)[A-Za-z\s\(\)]*)',
+            r'NIPT\s+Result[:\s]+([A-Za-z\s\(\)]+)',
         ]
         for pattern in result_patterns:
             result_match = re.search(pattern, text, re.IGNORECASE)
             if result_match:
-                data['final_result'] = result_match.group(1).strip()
-                break
-        
+                result = result_match.group(1).strip()
+                if len(result) > 3:
+                    data['final_result'] = result[:200]
+                    break
+
+        # Extract risk values if available
+        risk_patterns = [
+            (r'(?:T21|Trisomy\s*21|Down).*?Risk[:\s]+(?:1\s*(?:in|:)\s*)?(\d+)', 'risk_t21'),
+            (r'(?:T18|Trisomy\s*18|Edwards).*?Risk[:\s]+(?:1\s*(?:in|:)\s*)?(\d+)', 'risk_t18'),
+            (r'(?:T13|Trisomy\s*13|Patau).*?Risk[:\s]+(?:1\s*(?:in|:)\s*)?(\d+)', 'risk_t13'),
+        ]
+        for pattern, field in risk_patterns:
+            risk_match = re.search(pattern, text, re.IGNORECASE)
+            if risk_match:
+                data[field] = f"1 in {risk_match.group(1)}"
+
         # Extract clinical notes
         notes_patterns = [
-            r'(?:Clinical\s+)?Notes[:\s]+(.+?)(?:\n\n|={3,}|$)',
-            r'Comments[:\s]+(.+?)(?:\n\n|={3,}|$)',
+            r'(?:Clinical\s+)?Notes?[:\s]+(.+?)(?:\n\n|={3,}|Disclaimer|Limitation|$)',
+            r'Comments?[:\s]+(.+?)(?:\n\n|={3,}|$)',
+            r'(?:Additional\s+)?(?:Information|Remarks)[:\s]+(.+?)(?:\n\n|$)',
         ]
         for pattern in notes_patterns:
             notes_match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
             if notes_match:
-                data['notes'] = notes_match.group(1).strip()[:500]
-                break
-        
+                notes = notes_match.group(1).strip()
+                # Clean up notes
+                notes = re.sub(r'\s+', ' ', notes)
+                if len(notes) > 5:
+                    data['notes'] = notes[:500]
+                    break
+
+        # ===== EXTRACTION CONFIDENCE =====
+        # Calculate confidence based on how much data was extracted
+        extracted_fields = sum([
+            bool(data['patient_name']),
+            bool(data['mrn']),
+            data['age'] > 0,
+            data['weeks'] > 0,
+            data['cff'] > 0,
+            len(data['z_scores']) >= 3,
+            bool(data['final_result']),
+        ])
+
+        if extracted_fields >= 6:
+            data['extraction_confidence'] = 'HIGH'
+        elif extracted_fields >= 4:
+            data['extraction_confidence'] = 'MEDIUM'
+        else:
+            data['extraction_confidence'] = 'LOW'
+
         return data
-        
+
     except Exception as e:
-        st.error(f"PDF extraction error in {filename}: {e}")
+        st.error(f"PDF extraction error in {filename}: {str(e)}")
         return None
 
 def parse_pdf_batch(pdf_files: List) -> Dict[str, List[Dict]]:
@@ -642,88 +1012,450 @@ def parse_pdf_batch(pdf_files: List) -> Dict[str, List[Dict]]:
     
     return {'patients': patients, 'errors': errors}
 
+def get_maternal_age_risk(age: int) -> Dict[str, float]:
+    """Calculate maternal age-based prior risk for common aneuploidies.
+    Based on published maternal age-specific risk data."""
+    # Prior risks per 1000 pregnancies based on maternal age
+    # Data from Hook EB, 1981 and updated studies
+    age_risk_table = {
+        20: {'T21': 1/1441, 'T18': 1/10000, 'T13': 1/14300},
+        25: {'T21': 1/1383, 'T18': 1/8300, 'T13': 1/12500},
+        30: {'T21': 1/959, 'T18': 1/5900, 'T13': 1/9100},
+        32: {'T21': 1/659, 'T18': 1/4500, 'T13': 1/7100},
+        34: {'T21': 1/446, 'T18': 1/3300, 'T13': 1/5200},
+        35: {'T21': 1/356, 'T18': 1/2700, 'T13': 1/4200},
+        36: {'T21': 1/280, 'T18': 1/2200, 'T13': 1/3400},
+        37: {'T21': 1/218, 'T18': 1/1800, 'T13': 1/2700},
+        38: {'T21': 1/167, 'T18': 1/1400, 'T13': 1/2100},
+        39: {'T21': 1/128, 'T18': 1/1100, 'T13': 1/1700},
+        40: {'T21': 1/97, 'T18': 1/860, 'T13': 1/1300},
+        41: {'T21': 1/73, 'T18': 1/670, 'T13': 1/1000},
+        42: {'T21': 1/55, 'T18': 1/530, 'T13': 1/800},
+        43: {'T21': 1/41, 'T18': 1/410, 'T13': 1/630},
+        44: {'T21': 1/30, 'T18': 1/320, 'T13': 1/490},
+        45: {'T21': 1/23, 'T18': 1/250, 'T13': 1/380},
+    }
+
+    # Find closest age bracket
+    if age < 20:
+        return age_risk_table[20]
+    elif age >= 45:
+        return age_risk_table[45]
+
+    # Linear interpolation for ages between table values
+    sorted_ages = sorted(age_risk_table.keys())
+    for i, table_age in enumerate(sorted_ages):
+        if age <= table_age:
+            if age == table_age:
+                return age_risk_table[table_age]
+            # Interpolate
+            prev_age = sorted_ages[i-1] if i > 0 else table_age
+            next_age = table_age
+            ratio = (age - prev_age) / (next_age - prev_age) if next_age != prev_age else 0
+            prev_risks = age_risk_table.get(prev_age, age_risk_table[20])
+            next_risks = age_risk_table.get(next_age, age_risk_table[45])
+            return {
+                'T21': prev_risks['T21'] + (next_risks['T21'] - prev_risks['T21']) * ratio,
+                'T18': prev_risks['T18'] + (next_risks['T18'] - prev_risks['T18']) * ratio,
+                'T13': prev_risks['T13'] + (next_risks['T13'] - prev_risks['T13']) * ratio,
+            }
+
+    return age_risk_table[45]
+
+
+def get_clinical_recommendation(result: str, test_type: str) -> str:
+    """Generate clinical recommendation based on test result."""
+    recommendations = {
+        'POSITIVE': {
+            'T21': "Confirmatory diagnostic testing (amniocentesis or CVS) is strongly recommended. Genetic counseling should be offered.",
+            'T18': "Confirmatory diagnostic testing (amniocentesis or CVS) is strongly recommended. Detailed ultrasound and genetic counseling advised.",
+            'T13': "Confirmatory diagnostic testing (amniocentesis or CVS) is strongly recommended. Detailed ultrasound and genetic counseling advised.",
+            'SCA': "Genetic counseling recommended. Confirmatory testing may be considered based on clinical judgment.",
+            'CNV': "Detailed ultrasound recommended. Genetic counseling and possible confirmatory testing advised.",
+            'RAT': "Genetic counseling recommended. Clinical correlation and possible confirmatory testing advised."
+        },
+        'HIGH': {
+            'default': "Re-analysis recommended. If persistent, consider confirmatory diagnostic testing."
+        },
+        'LOW': {
+            'default': "No additional testing indicated based on NIPT result alone. Standard prenatal care recommended."
+        }
+    }
+
+    if 'POSITIVE' in result.upper():
+        return recommendations['POSITIVE'].get(test_type, recommendations['POSITIVE'].get('default', ''))
+    elif 'HIGH' in result.upper() or 'AMBIGUOUS' in result.upper():
+        return recommendations['HIGH']['default']
+    else:
+        return recommendations['LOW']['default']
+
+
 def generate_pdf_report(report_id: int) -> Optional[bytes]:
-    """Generate PDF report."""
+    """Generate comprehensive clinical PDF report for pathologist review."""
     try:
         with sqlite3.connect(DB_FILE) as conn:
             query = """
                 SELECT r.id, p.full_name, p.mrn_id, p.age, p.weeks, r.created_at, p.clinical_notes,
                        r.panel_type, r.qc_status, r.qc_details, r.qc_advice,
                        r.t21_res, r.t18_res, r.t13_res, r.sca_res,
-                       r.cnv_json, r.rat_json, r.full_z_json, r.final_summary
-                FROM results r 
-                JOIN patients p ON p.id = r.patient_id 
+                       r.cnv_json, r.rat_json, r.full_z_json, r.final_summary,
+                       p.weight_kg, p.height_cm, p.bmi,
+                       u.full_name as technician_name
+                FROM results r
+                JOIN patients p ON p.id = r.patient_id
+                LEFT JOIN users u ON u.id = r.created_by
                 WHERE r.id = ?
             """
             df = pd.read_sql(query, conn, params=(report_id,))
-            
+
         if df.empty: return None
 
         row = df.iloc[0]
-        cnvs = json.loads(row['cnv_json'])
-        rats = json.loads(row['rat_json'])
+        cnvs = json.loads(row['cnv_json']) if row['cnv_json'] else []
+        rats = json.loads(row['rat_json']) if row['rat_json'] else []
         z_data = json.loads(row['full_z_json']) if row['full_z_json'] else {}
+        qc_details = row['qc_details'] if row['qc_details'] else "[]"
+        config = load_config()
 
         buffer = io.BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.5*inch)
+        doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.4*inch, bottomMargin=0.5*inch)
         story = []
         styles = getSampleStyleSheet()
-        
-        title_style = ParagraphStyle('Title', parent=styles['Heading1'], fontSize=18, 
-                                     textColor=colors.HexColor('#2C3E50'), alignment=TA_CENTER)
-        
+
+        # Custom styles
+        title_style = ParagraphStyle('Title', parent=styles['Heading1'], fontSize=16,
+                                     textColor=colors.HexColor('#1a5276'), alignment=TA_CENTER,
+                                     spaceAfter=6)
+        subtitle_style = ParagraphStyle('Subtitle', parent=styles['Normal'], fontSize=10,
+                                        alignment=TA_CENTER, textColor=colors.HexColor('#566573'))
+        section_style = ParagraphStyle('Section', parent=styles['Heading2'], fontSize=11,
+                                       textColor=colors.HexColor('#2c3e50'), spaceBefore=10, spaceAfter=4)
+        small_style = ParagraphStyle('Small', parent=styles['Normal'], fontSize=8,
+                                     textColor=colors.HexColor('#7f8c8d'))
+        warning_style = ParagraphStyle('Warning', parent=styles['Normal'], fontSize=9,
+                                       textColor=colors.HexColor('#c0392b'), fontName='Helvetica-Bold')
+
+        # ===== HEADER =====
         story.append(Paragraph("CLINICAL GENETICS LABORATORY", title_style))
-        story.append(Paragraph("NIPT Report", styles['Normal']))
-        story.append(Spacer(1, 0.2*inch))
-        
-        info_data = [
-            ['Report ID:', str(row['id']), 'Date:', row['created_at'][:10]],
-            ['Panel:', row['panel_type'], '', '']
+        story.append(Paragraph("Non-Invasive Prenatal Testing (NIPT) Report", subtitle_style))
+        story.append(Spacer(1, 0.15*inch))
+
+        # ===== REPORT METADATA =====
+        report_date = row['created_at'][:10] if row['created_at'] else datetime.now().strftime('%Y-%m-%d')
+        report_time = row['created_at'][11:19] if len(row['created_at']) > 10 else ''
+
+        meta_data = [
+            ['Report ID:', str(row['id']), 'Report Date:', report_date],
+            ['Panel Type:', row['panel_type'], 'Report Time:', report_time],
         ]
-        info_table = Table(info_data, colWidths=[1.2*inch, 2.3*inch, 1*inch, 2*inch])
-        info_table.setStyle(TableStyle([
+        meta_table = Table(meta_data, colWidths=[1.1*inch, 2.2*inch, 1.1*inch, 2.1*inch])
+        meta_table.setStyle(TableStyle([
             ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+            ('FONTNAME', (2, 0), (2, -1), 'Helvetica-Bold'),
             ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('TEXTCOLOR', (0, 0), (-1, -1), colors.HexColor('#2c3e50')),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
         ]))
-        story.append(info_table)
-        story.append(Spacer(1, 0.2*inch))
-        
-        story.append(Paragraph("PATIENT INFORMATION", styles['Heading2']))
+        story.append(meta_table)
+        story.append(Spacer(1, 0.1*inch))
+
+        # ===== PATIENT INFORMATION =====
+        story.append(Paragraph("PATIENT INFORMATION", section_style))
+
+        # Calculate BMI if not present
+        bmi_val = row['bmi'] if row['bmi'] else (
+            round(row['weight_kg'] / ((row['height_cm']/100)**2), 1)
+            if row['weight_kg'] and row['height_cm'] and row['height_cm'] > 0 else 'N/A'
+        )
+
+        # Get maternal age risk
+        maternal_risk = get_maternal_age_risk(int(row['age'])) if row['age'] else {}
+
         patient_data = [
-            ['Name:', row['full_name'], 'MRN:', row['mrn_id']],
-            ['Age:', f"{row['age']}", 'Weeks:', f"{row['weeks']}"],
+            ['Name:', str(row['full_name']), 'MRN:', str(row['mrn_id'])],
+            ['Maternal Age:', f"{row['age']} years", 'Gestational Age:', f"{row['weeks']} weeks"],
+            ['Weight:', f"{row['weight_kg']} kg" if row['weight_kg'] else 'N/A',
+             'Height:', f"{row['height_cm']} cm" if row['height_cm'] else 'N/A'],
+            ['BMI:', str(bmi_val), '', ''],
         ]
-        patient_table = Table(patient_data, colWidths=[1.2*inch, 2.3*inch, 1.2*inch, 1.8*inch])
-        patient_table.setStyle(TableStyle([('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold')]))
+        patient_table = Table(patient_data, colWidths=[1.1*inch, 2.2*inch, 1.1*inch, 2.1*inch])
+        patient_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+            ('FONTNAME', (2, 0), (2, -1), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#f8f9fa')),
+            ('BOX', (0, 0), (-1, -1), 0.5, colors.HexColor('#dee2e6')),
+        ]))
         story.append(patient_table)
-        story.append(Spacer(1, 0.2*inch))
-        
-        story.append(Paragraph("RESULTS", styles['Heading2']))
-        results_data = [
-            ['Test', 'Result', 'Z-Score'],
-            ['Trisomy 21', row['t21_res'], str(z_data.get('21', 'N/A'))],
-            ['Trisomy 18', row['t18_res'], str(z_data.get('18', 'N/A'))],
-            ['Trisomy 13', row['t13_res'], str(z_data.get('13', 'N/A'))],
-            ['SCA', row['sca_res'], '']
+        story.append(Spacer(1, 0.1*inch))
+
+        # ===== QUALITY CONTROL METRICS =====
+        story.append(Paragraph("QUALITY CONTROL ASSESSMENT", section_style))
+
+        qc_status = row['qc_status']
+        qc_color = colors.HexColor('#27ae60') if qc_status == 'PASS' else (
+            colors.HexColor('#f39c12') if qc_status == 'WARNING' else colors.HexColor('#e74c3c'))
+
+        qc_header = [['QC Status', 'Parameter', 'Value', 'Reference Range', 'Status']]
+        qc_rows = []
+
+        # Get thresholds from config
+        thresholds = config['QC_THRESHOLDS']
+        panel_limits = config['PANEL_READ_LIMITS']
+        min_reads = panel_limits.get(row['panel_type'], 5)
+
+        # Parse QC details to extract actual values if available
+        qc_items = [
+            ('Fetal Fraction (Cff)', 'N/A', f"≥ {thresholds['MIN_CFF']}%", ''),
+            ('GC Content', 'N/A', f"{thresholds['GC_RANGE'][0]}-{thresholds['GC_RANGE'][1]}%", ''),
+            ('Sequencing Reads', 'N/A', f"≥ {min_reads}M", ''),
+            ('Unique Read Rate', 'N/A', f"≥ {thresholds['MIN_UNIQ_RATE']}%", ''),
+            ('Error Rate', 'N/A', f"≤ {thresholds['MAX_ERROR_RATE']}%", ''),
+            ('Quality Score', 'N/A', f"< {thresholds['QS_LIMIT_NEG']}", ''),
         ]
-        
-        results_table = Table(results_data, colWidths=[2*inch, 3*inch, 1.5*inch])
-        results_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+
+        for i, (param, val, ref, status) in enumerate(qc_items):
+            if i == 0:
+                qc_rows.append([qc_status, param, val, ref, 'See Details'])
+            else:
+                qc_rows.append(['', param, val, ref, ''])
+
+        qc_table_data = qc_header + qc_rows
+        qc_table = Table(qc_table_data, colWidths=[0.9*inch, 1.5*inch, 0.9*inch, 1.5*inch, 1.0*inch])
+        qc_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#34495e')),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#bdc3c7')),
+            ('BACKGROUND', (0, 1), (0, 1), qc_color),
+            ('TEXTCOLOR', (0, 1), (0, 1), colors.whitesmoke),
+            ('FONTNAME', (0, 1), (0, 1), 'Helvetica-Bold'),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
         ]))
+        story.append(qc_table)
+
+        if row['qc_advice'] and row['qc_advice'] != 'None':
+            story.append(Spacer(1, 0.05*inch))
+            story.append(Paragraph(f"<b>QC Recommendation:</b> {row['qc_advice']}", warning_style))
+
+        story.append(Spacer(1, 0.1*inch))
+
+        # ===== MAIN RESULTS =====
+        story.append(Paragraph("ANEUPLOIDY SCREENING RESULTS", section_style))
+
+        # Determine fetal sex from SCA result
+        sca_result = row['sca_res'] or ''
+        fetal_sex = 'Male' if 'Male' in sca_result or 'XY' in sca_result else (
+            'Female' if 'Female' in sca_result or 'XX' in sca_result else 'Undetermined')
+
+        # Get Z-scores
+        z21 = z_data.get('21', z_data.get(21, 'N/A'))
+        z18 = z_data.get('18', z_data.get(18, 'N/A'))
+        z13 = z_data.get('13', z_data.get(13, 'N/A'))
+        z_xx = z_data.get('XX', 'N/A')
+        z_xy = z_data.get('XY', 'N/A')
+
+        # Helper to format Z-score
+        def fmt_z(z):
+            if isinstance(z, (int, float)):
+                return f"{z:.2f}"
+            return str(z)
+
+        # Results table with risk interpretation
+        results_header = [['Condition', 'Result', 'Z-Score', 'Risk Category', 'Reference']]
+        results_rows = [
+            ['Trisomy 21 (Down Syndrome)', row['t21_res'], fmt_z(z21),
+             'SCREEN POSITIVE' if 'POSITIVE' in str(row['t21_res']).upper() else 'LOW RISK',
+             'Z < 2.58'],
+            ['Trisomy 18 (Edwards Syndrome)', row['t18_res'], fmt_z(z18),
+             'SCREEN POSITIVE' if 'POSITIVE' in str(row['t18_res']).upper() else 'LOW RISK',
+             'Z < 2.58'],
+            ['Trisomy 13 (Patau Syndrome)', row['t13_res'], fmt_z(z13),
+             'SCREEN POSITIVE' if 'POSITIVE' in str(row['t13_res']).upper() else 'LOW RISK',
+             'Z < 2.58'],
+            ['Sex Chromosome Aneuploidy', row['sca_res'], f"XX:{fmt_z(z_xx)} XY:{fmt_z(z_xy)}",
+             'SCREEN POSITIVE' if 'POSITIVE' in str(row['sca_res']).upper() else 'LOW RISK',
+             'Z < 4.5'],
+        ]
+
+        results_data = results_header + results_rows
+        results_table = Table(results_data, colWidths=[1.8*inch, 1.5*inch, 1.1*inch, 1.1*inch, 0.9*inch])
+
+        # Color code results
+        table_style = [
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2c3e50')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#bdc3c7')),
+            ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+            ('TOPPADDING', (0, 0), (-1, -1), 5),
+        ]
+
+        # Highlight positive results
+        for idx, result_row in enumerate(results_rows, 1):
+            if 'POSITIVE' in str(result_row[1]).upper() or 'POSITIVE' in str(result_row[3]).upper():
+                table_style.append(('BACKGROUND', (0, idx), (-1, idx), colors.HexColor('#fadbd8')))
+                table_style.append(('TEXTCOLOR', (3, idx), (3, idx), colors.HexColor('#c0392b')))
+                table_style.append(('FONTNAME', (3, idx), (3, idx), 'Helvetica-Bold'))
+
+        results_table.setStyle(TableStyle(table_style))
         story.append(results_table)
+        story.append(Spacer(1, 0.08*inch))
+
+        # Fetal Sex
+        story.append(Paragraph(f"<b>Fetal Sex:</b> {fetal_sex}", styles['Normal']))
+        story.append(Spacer(1, 0.1*inch))
+
+        # ===== CNV FINDINGS =====
+        if cnvs and len(cnvs) > 0:
+            story.append(Paragraph("COPY NUMBER VARIATION (CNV) FINDINGS", section_style))
+            cnv_header = [['Finding', 'Clinical Significance']]
+            cnv_rows = [[str(cnv), get_clinical_recommendation(str(cnv), 'CNV')] for cnv in cnvs]
+            cnv_data = cnv_header + cnv_rows
+            cnv_table = Table(cnv_data, colWidths=[3*inch, 3.5*inch])
+            cnv_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#8e44ad')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 8),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#bdc3c7')),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ]))
+            story.append(cnv_table)
+            story.append(Spacer(1, 0.1*inch))
+
+        # ===== RAT FINDINGS =====
+        if rats and len(rats) > 0:
+            story.append(Paragraph("RARE AUTOSOMAL TRISOMY (RAT) FINDINGS", section_style))
+            rat_header = [['Finding', 'Clinical Significance']]
+            rat_rows = [[str(rat), get_clinical_recommendation(str(rat), 'RAT')] for rat in rats]
+            rat_data = rat_header + rat_rows
+            rat_table = Table(rat_data, colWidths=[3*inch, 3.5*inch])
+            rat_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#d35400')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 8),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#bdc3c7')),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ]))
+            story.append(rat_table)
+            story.append(Spacer(1, 0.1*inch))
+
+        # ===== MATERNAL AGE RISK =====
+        if maternal_risk and row['age']:
+            story.append(Paragraph("MATERNAL AGE-BASED PRIOR RISK", section_style))
+            risk_text = (f"Based on maternal age of {row['age']} years, the a priori risks are: "
+                        f"Trisomy 21: 1 in {int(1/maternal_risk['T21'])}, "
+                        f"Trisomy 18: 1 in {int(1/maternal_risk['T18'])}, "
+                        f"Trisomy 13: 1 in {int(1/maternal_risk['T13'])}")
+            story.append(Paragraph(risk_text, small_style))
+            story.append(Spacer(1, 0.1*inch))
+
+        # ===== FINAL INTERPRETATION =====
+        story.append(Paragraph("FINAL INTERPRETATION", section_style))
+
+        final_summary = row['final_summary']
+        final_color = colors.HexColor('#27ae60') if 'NEGATIVE' in str(final_summary).upper() else (
+            colors.HexColor('#e74c3c') if 'POSITIVE' in str(final_summary).upper() else colors.HexColor('#f39c12'))
+
+        final_box = Table([[final_summary]], colWidths=[6.5*inch])
+        final_box.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (0, 0), final_color),
+            ('TEXTCOLOR', (0, 0), (0, 0), colors.whitesmoke),
+            ('FONTNAME', (0, 0), (0, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (0, 0), 12),
+            ('ALIGN', (0, 0), (0, 0), 'CENTER'),
+            ('BOTTOMPADDING', (0, 0), (0, 0), 8),
+            ('TOPPADDING', (0, 0), (0, 0), 8),
+        ]))
+        story.append(final_box)
+        story.append(Spacer(1, 0.1*inch))
+
+        # ===== CLINICAL RECOMMENDATIONS =====
+        story.append(Paragraph("CLINICAL RECOMMENDATIONS", section_style))
+
+        recommendations = []
+        if 'POSITIVE' in str(row['t21_res']).upper():
+            recommendations.append(f"• Trisomy 21: {get_clinical_recommendation(row['t21_res'], 'T21')}")
+        if 'POSITIVE' in str(row['t18_res']).upper():
+            recommendations.append(f"• Trisomy 18: {get_clinical_recommendation(row['t18_res'], 'T18')}")
+        if 'POSITIVE' in str(row['t13_res']).upper():
+            recommendations.append(f"• Trisomy 13: {get_clinical_recommendation(row['t13_res'], 'T13')}")
+        if 'POSITIVE' in str(row['sca_res']).upper():
+            recommendations.append(f"• SCA: {get_clinical_recommendation(row['sca_res'], 'SCA')}")
+
+        if not recommendations:
+            recommendations.append("• No high-risk findings detected. Continue standard prenatal care.")
+            recommendations.append("• NIPT is a screening test. It does not diagnose chromosomal abnormalities.")
+
+        for rec in recommendations:
+            story.append(Paragraph(rec, styles['Normal']))
+        story.append(Spacer(1, 0.1*inch))
+
+        # ===== CLINICAL NOTES =====
+        if row['clinical_notes']:
+            story.append(Paragraph("CLINICAL NOTES", section_style))
+            story.append(Paragraph(str(row['clinical_notes']), styles['Normal']))
+            story.append(Spacer(1, 0.1*inch))
+
+        # ===== LIMITATIONS & DISCLAIMER =====
+        story.append(Paragraph("LIMITATIONS AND DISCLAIMER", section_style))
+        disclaimer_text = """
+        <b>Important Information:</b><br/>
+        • NIPT is a screening test, not a diagnostic test. Positive results should be confirmed with diagnostic testing (amniocentesis or CVS).<br/>
+        • False positive and false negative results can occur. A negative result does not eliminate the possibility of chromosomal abnormalities.<br/>
+        • This test screens for specific chromosomal conditions and does not detect all genetic disorders.<br/>
+        • Results should be interpreted in conjunction with other clinical findings, ultrasound, and maternal history.<br/>
+        • Test performance may be affected by factors including: low fetal fraction, maternal chromosomal abnormalities, confined placental mosaicism, vanishing twin, or maternal malignancy.<br/>
+        • Genetic counseling is recommended for all patients, especially those with positive or inconclusive results.
+        """
+        story.append(Paragraph(disclaimer_text, small_style))
+        story.append(Spacer(1, 0.15*inch))
+
+        # ===== SIGNATURE SECTION =====
+        story.append(Paragraph("AUTHORIZATION", section_style))
+
+        sig_data = [
+            ['Performed by:', row['technician_name'] or 'Laboratory Staff', 'Date:', report_date],
+            ['', '', '', ''],
+            ['Reviewed by:', '_' * 30, 'Date:', '_' * 15],
+            ['Clinical Pathologist', '', '', ''],
+            ['', '', '', ''],
+            ['Approved by:', '_' * 30, 'Date:', '_' * 15],
+            ['Laboratory Director', '', '', ''],
+        ]
+        sig_table = Table(sig_data, colWidths=[1.2*inch, 2.3*inch, 0.8*inch, 2.2*inch])
+        sig_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+            ('FONTNAME', (2, 0), (2, -1), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('FONTSIZE', (0, 3), (0, 3), 8),
+            ('FONTSIZE', (0, 6), (0, 6), 8),
+            ('TEXTCOLOR', (0, 3), (0, 3), colors.HexColor('#7f8c8d')),
+            ('TEXTCOLOR', (0, 6), (0, 6), colors.HexColor('#7f8c8d')),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ]))
+        story.append(sig_table)
+
+        # ===== FOOTER =====
         story.append(Spacer(1, 0.2*inch))
-        
-        story.append(Paragraph(f"<b>FINAL: {row['final_summary']}</b>", styles['Normal']))
-        
+        footer_text = f"Report generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | NRIS v2.0 Enhanced Edition"
+        story.append(Paragraph(footer_text, small_style))
+
         doc.build(story)
         return buffer.getvalue()
-        
+
     except Exception as e:
-        st.error(f"PDF error: {e}")
+        st.error(f"PDF generation error: {e}")
         return None
 
 # ==================== ANALYTICS ====================
@@ -1108,12 +1840,72 @@ def main():
             
             st.divider()
             
-            col_exp, col_del, col_pdf = st.columns(3)
-            
+            col_exp, col_json, col_del, col_pdf = st.columns(4)
+
             with col_exp:
                 full_dump = pd.read_sql("SELECT * FROM results r JOIN patients p ON p.id = r.patient_id", conn)
-                st.download_button("📥 Export CSV", full_dump.to_csv(index=False), 
+                st.download_button("📥 Export CSV", full_dump.to_csv(index=False),
                                  "nipt_registry.csv", "text/csv")
+
+            with col_json:
+                # Generate comprehensive JSON export
+                with sqlite3.connect(DB_FILE) as json_conn:
+                    json_query = """
+                        SELECT r.id as report_id, r.created_at as report_date,
+                               p.full_name, p.mrn_id, p.age, p.weight_kg, p.height_cm, p.bmi, p.weeks,
+                               p.clinical_notes, r.panel_type, r.qc_status, r.qc_details, r.qc_advice,
+                               r.t21_res, r.t18_res, r.t13_res, r.sca_res,
+                               r.cnv_json, r.rat_json, r.full_z_json, r.final_summary
+                        FROM results r
+                        JOIN patients p ON p.id = r.patient_id
+                        ORDER BY r.id DESC
+                    """
+                    json_df = pd.read_sql(json_query, json_conn)
+
+                    # Convert to structured JSON
+                    json_records = []
+                    for _, row in json_df.iterrows():
+                        record = {
+                            'report_id': int(row['report_id']) if pd.notna(row['report_id']) else None,
+                            'report_date': str(row['report_date']) if pd.notna(row['report_date']) else None,
+                            'patient': {
+                                'name': str(row['full_name']) if pd.notna(row['full_name']) else None,
+                                'mrn': str(row['mrn_id']) if pd.notna(row['mrn_id']) else None,
+                                'age': int(row['age']) if pd.notna(row['age']) else None,
+                                'weight_kg': float(row['weight_kg']) if pd.notna(row['weight_kg']) else None,
+                                'height_cm': int(row['height_cm']) if pd.notna(row['height_cm']) else None,
+                                'bmi': float(row['bmi']) if pd.notna(row['bmi']) else None,
+                                'gestational_weeks': int(row['weeks']) if pd.notna(row['weeks']) else None,
+                                'clinical_notes': str(row['clinical_notes']) if pd.notna(row['clinical_notes']) else None,
+                            },
+                            'test_info': {
+                                'panel_type': str(row['panel_type']) if pd.notna(row['panel_type']) else None,
+                                'qc_status': str(row['qc_status']) if pd.notna(row['qc_status']) else None,
+                                'qc_details': str(row['qc_details']) if pd.notna(row['qc_details']) else None,
+                                'qc_advice': str(row['qc_advice']) if pd.notna(row['qc_advice']) else None,
+                            },
+                            'results': {
+                                'trisomy_21': str(row['t21_res']) if pd.notna(row['t21_res']) else None,
+                                'trisomy_18': str(row['t18_res']) if pd.notna(row['t18_res']) else None,
+                                'trisomy_13': str(row['t13_res']) if pd.notna(row['t13_res']) else None,
+                                'sca': str(row['sca_res']) if pd.notna(row['sca_res']) else None,
+                                'cnv_findings': json.loads(row['cnv_json']) if pd.notna(row['cnv_json']) else [],
+                                'rat_findings': json.loads(row['rat_json']) if pd.notna(row['rat_json']) else [],
+                                'z_scores': json.loads(row['full_z_json']) if pd.notna(row['full_z_json']) else {},
+                                'final_summary': str(row['final_summary']) if pd.notna(row['final_summary']) else None,
+                            }
+                        }
+                        json_records.append(record)
+
+                    json_export = {
+                        'export_date': datetime.now().isoformat(),
+                        'total_records': len(json_records),
+                        'exported_by': st.session_state.user['username'],
+                        'records': json_records
+                    }
+
+                st.download_button("📤 Export JSON", json.dumps(json_export, indent=2),
+                                 "nipt_registry.json", "application/json")
             
             with col_del:
                 with st.expander("🗑️ Delete Record"):
@@ -1556,31 +2348,82 @@ def main():
         st.divider()
         
         st.subheader("User Management")
+
+        # Password Change Section (available to all users)
+        st.markdown("**🔑 Change Password**")
+        with st.form("change_password_form"):
+            current_password = st.text_input("Current Password", type="password", key="curr_pwd")
+            new_password_1 = st.text_input("New Password", type="password", key="new_pwd1")
+            new_password_2 = st.text_input("Confirm New Password", type="password", key="new_pwd2")
+
+            if st.form_submit_button("Update Password"):
+                if not current_password or not new_password_1 or not new_password_2:
+                    st.error("All fields are required")
+                elif new_password_1 != new_password_2:
+                    st.error("New passwords do not match")
+                elif len(new_password_1) < 6:
+                    st.error("New password must be at least 6 characters")
+                else:
+                    # Verify current password
+                    with sqlite3.connect(DB_FILE) as conn:
+                        c = conn.cursor()
+                        c.execute("SELECT password_hash FROM users WHERE id = ?",
+                                 (st.session_state.user['id'],))
+                        row = c.fetchone()
+                        if row and verify_password(current_password, row[0]):
+                            # Update password
+                            new_hash = hash_password(new_password_1)
+                            c.execute("UPDATE users SET password_hash = ? WHERE id = ?",
+                                     (new_hash, st.session_state.user['id']))
+                            st.success("✅ Password updated successfully")
+                            log_audit("PASSWORD_CHANGE", "User changed password",
+                                     st.session_state.user['id'])
+                        else:
+                            st.error("Current password is incorrect")
+
+        st.divider()
+
+        # Admin-only user management
         if st.session_state.user['role'] == 'admin':
+            st.markdown("**👥 Create New User**")
             with st.form("new_user_form"):
-                st.markdown("**Create New User**")
                 new_username = st.text_input("Username")
                 new_password = st.text_input("Password", type="password")
                 new_fullname = st.text_input("Full Name")
-                new_role = st.selectbox("Role", ["technician", "admin"])
-                
+                new_role = st.selectbox("Role", ["technician", "geneticist", "admin"],
+                                       help="Technician: Data entry and analysis. Geneticist: Analysis, review and approval. Admin: Full access including user management.")
+
                 if st.form_submit_button("Create User"):
                     if new_username and new_password:
-                        try:
-                            with sqlite3.connect(DB_FILE) as conn:
-                                c = conn.cursor()
-                                c.execute("""
-                                    INSERT INTO users (username, password_hash, full_name, role, created_at)
-                                    VALUES (?, ?, ?, ?, ?)
-                                """, (new_username, hash_password(new_password), 
-                                     new_fullname, new_role, datetime.now().isoformat()))
-                                st.success(f"✅ User '{new_username}' created")
-                                log_audit("CREATE_USER", f"Created user {new_username}", 
-                                         st.session_state.user['id'])
-                        except sqlite3.IntegrityError:
-                            st.error("Username already exists")
+                        if len(new_password) < 6:
+                            st.error("Password must be at least 6 characters")
+                        else:
+                            try:
+                                with sqlite3.connect(DB_FILE) as conn:
+                                    c = conn.cursor()
+                                    c.execute("""
+                                        INSERT INTO users (username, password_hash, full_name, role, created_at)
+                                        VALUES (?, ?, ?, ?, ?)
+                                    """, (new_username, hash_password(new_password),
+                                         new_fullname, new_role, datetime.now().isoformat()))
+                                    st.success(f"✅ User '{new_username}' created with role '{new_role}'")
+                                    log_audit("CREATE_USER", f"Created user {new_username} with role {new_role}",
+                                             st.session_state.user['id'])
+                            except sqlite3.IntegrityError:
+                                st.error("Username already exists")
                     else:
                         st.error("Username and password required")
+
+            # List existing users
+            st.markdown("**📋 Existing Users**")
+            with sqlite3.connect(DB_FILE) as conn:
+                users_df = pd.read_sql("""
+                    SELECT id, username, full_name, role, created_at, last_login
+                    FROM users ORDER BY id
+                """, conn)
+
+            if not users_df.empty:
+                st.dataframe(users_df, use_container_width=True, height=200)
         else:
             st.info("Admin access required for user management")
         
